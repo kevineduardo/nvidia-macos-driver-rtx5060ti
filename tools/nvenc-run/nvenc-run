@@ -1,0 +1,56 @@
+#!/bin/sh
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 kevineduardo
+# nvenc-run: run a command-line tool with the driver's VideoToolbox codecs (libnvencvt) registered from its start.
+#
+#   nvenc-run <tool> [args...]      e.g. nvenc-run ffmpeg -hwaccel videotoolbox -i in.mkv out.mp4
+#   nvenc-run --check <tool>        whether the library can reach <tool> (hardened runtime, AMFI) and is installed
+#   nvenc-run --help
+#
+# Why: VideoToolbox copies its decoder list before it starts the GPU, and starting the GPU is what loads the NVIDIA
+# Metal plugin, which registers libnvencvt. Apps that use Metal before they decode get the hardware decoders; a
+# command-line tool's first session does not (ffmpeg falls back to Apple's software decoder; for AV1 the pictures up
+# to the next key frame are lost). Loading the library into the tool (DYLD_INSERT_LIBRARIES) registers the decoders,
+# and the encoders where the card has them, before anything else. Nothing system-wide changes.
+LIB=${NVENC_RUN_LIB:-/Library/GPUBundles/NVMTLDriver.bundle/Contents/MacOS/libnvencvt.dylib}
+me=nvenc-run
+
+amfi_off() { sysctl -n kern.bootargs 2>/dev/null | tr ' ' '\n' | grep -q -E '^amfi_get_out_of_my_way=(1|0x1)$'; }
+
+check() {
+  t=$(command -v "$1" 2>/dev/null) || { echo "$me: $1: not found in PATH"; return 1; }
+  t=$(cd "$(dirname "$t")" && pwd -P)/$(basename "$t")
+  while [ -L "$t" ]; do l=$(readlink "$t"); case $l in /*) t=$l;; *) t=$(dirname "$t")/$l;; esac; done
+  echo "tool:     $t"
+  if [ -f "$LIB" ]; then echo "library:  $LIB"; else echo "library:  MISSING ($LIB): is the driver installed?"; return 1; fi
+  case $(head -c 2 "$t" 2>/dev/null) in
+    '#!') echo "note:     $t is a script; its interpreter and the programs it starts inherit the library" ;;
+  esac
+  flags=$(codesign -dv "$t" 2>&1 | sed -n 's/.*flags=\(0x[0-9a-f]*\).*/\1/p')
+  ents=$(codesign -d --entitlements - "$t" 2>/dev/null)
+  if [ -n "$flags" ] && [ $((flags & 0x10000)) -ne 0 ]; then
+    if echo "$ents" | grep -q 'allow-dyld-environment-variables'; then echo "reach:    yes (hardened runtime, allows DYLD environment variables)"
+    elif amfi_off; then echo "reach:    yes (hardened runtime, but AMFI is off on this boot: amfi_get_out_of_my_way=1)"
+    else echo "reach:    NO: hardened runtime strips DYLD_INSERT_LIBRARIES. Re-sign a copy ad hoc (codesign -s - -f <copy>) and run that."; return 1; fi
+  else echo "reach:    yes (no hardened runtime)"; fi
+  case $t in /System/*|/usr/bin/*|/usr/sbin/*|/bin/*|/sbin/*)
+    amfi_off || { echo "reach:    NO: a platform binary; DYLD variables are dropped for it while AMFI is on"; return 1; } ;;
+  esac
+  return 0
+}
+
+case ${1-} in
+  -h|--help) sed -n '4,15p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+  --check) shift; [ -n "${1-}" ] || { echo "usage: $me --check <tool>" >&2; exit 2; }; check "$1"; exit $? ;;
+  "") echo "usage: $me <tool> [args...]   ($me --help)" >&2; exit 2 ;;
+esac
+if [ ! -f "$LIB" ]; then
+  echo "$me: $LIB is missing; running $1 without the hardware codecs" >&2
+  exec "$@"
+fi
+case :${DYLD_INSERT_LIBRARIES-}: in
+  *:"$LIB":*) ;;
+  *) DYLD_INSERT_LIBRARIES=$LIB${DYLD_INSERT_LIBRARIES:+:$DYLD_INSERT_LIBRARIES} ;;
+esac
+export DYLD_INSERT_LIBRARIES
+exec "$@"

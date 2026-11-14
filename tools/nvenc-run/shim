@@ -1,0 +1,17 @@
+#!/bin/sh
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 kevineduardo
+# shim: installed as ffmpeg, ffprobe, ffplay, HandBrakeCLI, avconvert (links to this file) in a folder put first in PATH.
+# Runs the real tool of the same name - the next one in PATH after this folder - through nvenc-run.
+# NVENC_RUN_OFF=1 runs it as it is.
+name=$(basename "$0"); here=$(cd "$(dirname "$0")" && pwd -P)
+real=; IFS=:
+for d in $PATH; do
+  [ -n "$d" ] || continue
+  [ "$(cd "$d" 2>/dev/null && pwd -P)" = "$here" ] && continue
+  if [ -x "$d/$name" ] && [ ! -d "$d/$name" ]; then real=$d/$name; break; fi
+done
+unset IFS
+[ -n "$real" ] || { echo "$name: not installed (nvenc-run's wrapper in $here found no real $name in PATH)" >&2; exit 127; }
+[ -n "${NVENC_RUN_OFF-}" ] && exec "$real" "$@"
+exec "${NVENC_RUN:-/usr/local/bin/nvenc-run}" "$real" "$@"

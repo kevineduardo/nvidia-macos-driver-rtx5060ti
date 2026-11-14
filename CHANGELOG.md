@@ -15,6 +15,7 @@
 - A 10-bit VP9 / AV1 / HEVC stream read as 8-bit is converted while it is copied out: 4K AV1 16 -> 93 fps.
 - HEVC through libnvencvt on Blackwell too, above NullMoth's closed decoder: bit-exact on the JCT-VC conformance streams, 2-3x faster through ffmpeg-based players and 5x for 8-bit clients of 10-bit streams.
 - Test bench: tools/blackwell-video (`validate.sh`).
+- `tools/nvenc-run`: runs a command-line tool (ffmpeg, HandBrakeCLI) with the hardware decoders registered from its start; without it such a tool's first VideoToolbox session falls back to software, and fails for AV1.
 
 ## 3.0
 
