@@ -233,20 +233,21 @@ void rm_event_close(Rm *rm, RmEvent *ev)
 NvU32 rm_class(Rm *rm, int kind)
 {
     if (!rm->clsRead) {
-        static const NvU32 want[4][8] = {
+        static const NvU32 want[5][8] = {
             // Blackwell's classes are the ones open-gpu-kernel-modules names: clcfb7.h, clcfb0.h, clc96f.h. Its RM lists
             // no older channel class, so without 0xc96f no channel could be made there at all.
             { 0xcfb7, 0xc9b7, 0xc7b7, 0xc5b7, 0xc4b7, 0xb4b7, 0xc3b7 },     // NVENC: Blackwell, Ada, Ampere, Turing, TU117 (Volta's), Volta
             { 0xcfb0, 0xc9b0, 0xc7b0, 0xc6b0, 0xc5b0, 0xc4b0, 0xc3b0 },     // NVDEC
             { 0xc96f, 0xc56f, 0xc46f, 0xc36f },                             // GPFIFO: Blackwell, Ampere, Turing, Volta
-            { 0xc561, 0xc461, 0xc361 } };                                   // usermode (doorbell page)
+            { 0xc561, 0xc461, 0xc361 },                                     // usermode (doorbell page)
+            { 0xcab5, 0xc9b5, 0xc8b5, 0xc7b5, 0xc6b5, 0xc5b5, 0xc3b5 } };   // copy engine (cecopy.h)
         static _Thread_local NV0080_CTRL_GPU_GET_CLASSLIST_V2_PARAMS cl; memset(&cl, 0, sizeof cl);
         if (rm_ctrl(rm, rm->device, NV0080_CTRL_CMD_GPU_GET_CLASSLIST_V2, &cl, sizeof cl) == NV_OK)
-            for (int k = 0; k < 4; k++)
+            for (int k = 0; k < 5; k++)
                 for (int w = 0; w < 8 && want[k][w] && !rm->cls[k]; w++)
                     for (NvU32 i = 0; i < cl.numClasses; i++) if (cl.classList[i] == want[k][w]) { rm->cls[k] = want[k][w]; break; }
         rm->clsRead = true;
         if (rm->verbose) fprintf(stderr, "rm: NVENC 0x%x NVDEC 0x%x channel 0x%x usermode 0x%x\n", rm->cls[0], rm->cls[1], rm->cls[2], rm->cls[3]);
     }
-    return kind >= 0 && kind < 4 ? rm->cls[kind] : 0;
+    return kind >= 0 && kind < 5 ? rm->cls[kind] : 0;
 }

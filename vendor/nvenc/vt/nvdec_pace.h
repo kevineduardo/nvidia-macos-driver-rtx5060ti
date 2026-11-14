@@ -17,6 +17,7 @@
 //   - a step up that has to be undone within 4 s doubles the wait before the next one (to 48 s): two streams on one
 //     engine (a screen saver on two monitors) each saw room at 30 pictures a second, went to 60 together, overloaded
 //     the engine, fell back, and did it again every two seconds
+//   - never more than 60 pictures a second (max_fps): what a display shows; a player given more did worse
 //   - up only where the stream allows it: at a TSA picture of the next sub-layer (then to any higher one), an STSA
 //     picture (that sub-layer alone), or an IRAP
 // Pure C, no VideoToolbox: tools/test_nvdec_pace.py runs it on streams' sub-layer patterns.
@@ -40,13 +41,14 @@ typedef struct {
     double raise_wait_s;          // how long it must fit before a step up (1.5 s, doubled after a step up that failed)
     double since_raise_s;         // stream seconds since the last step up
     bool realtime;
+    double max_fps;               // never decode more pictures a second than this in real time (0: no cap)
     unsigned long dropped, decoded;
 } NvPace;
 
 static inline void nvpace_init(NvPace *p)
 {
     memset(p, 0, sizeof *p); p->decoding = p->limit = NVPACE_ALL; p->pts_lo = 1; p->pts_hi = 0;
-    p->raise_wait_s = 1.5; p->since_raise_s = 1e9;
+    p->raise_wait_s = 1.5; p->since_raise_s = 1e9; p->max_fps = 60;
 }
 
 // The cost of the picture just decoded: the wall time the decoder needed for it, waiting for the engine and for room
@@ -82,16 +84,22 @@ static inline void nvpace_decide(NvPace *p, double dur_s)
         if (p->rate[t] > 0.5) top = t;      // a sub-layer the player still sends (more than a picture in two seconds)
     }
     if (!p->realtime) { p->limit = NVPACE_ALL; p->fits_higher_s = 0; return; }
+    // More pictures than a display shows help nobody, and a player given 120 a second of 4K did worse than with 60: once
+    // the engine could afford them (pictures in video memory: 5 ms each) it showed 44 a second in uneven steps where 60
+    // had been steady. So: the highest sub-layer that stays within max_fps (30% over: the rates are peaks of short windows, and the next sub-layer doubles them).
+    int cap = top;
+    if (p->max_fps > 0) { double r = p->rate[0]; cap = 0; for (int t = 1; t <= top; t++) { r += p->rate[t]; if (r <= p->max_fps * 1.3) cap = t; else break; } }
     const int was = p->limit > top ? top : p->limit;
-    int cur = was;
+    int cur = was > cap ? cap : was;
     p->since_raise_s += span;
+    if (cur < was && cur == cap && nvpace_load(p, cur) <= 0.85) { p->limit = cur; p->fits_higher_s = 0; return; }   // down to the cap: not a failed step up
     while (cur > 0 && nvpace_load(p, cur) > 0.85) cur--;                      // down at once, as far as needed
     if (cur < was) {
         if (p->since_raise_s < 4.0) p->raise_wait_s = p->raise_wait_s * 2 < 48 ? p->raise_wait_s * 2 : 48;   // the step up did not hold
         p->limit = cur; p->fits_higher_s = 0; return;
     }
     if (p->since_raise_s > 60 && p->raise_wait_s > 1.5) p->raise_wait_s = 1.5;   // the last step up held for a minute
-    if (cur < top && nvpace_load(p, cur + 1) <= 0.70) {                       // up one, after it fits for long enough
+    if (cur < top && cur < cap && nvpace_load(p, cur + 1) <= 0.70) {                       // up one, after it fits for long enough
         p->fits_higher_s += span;
         if (p->fits_higher_s >= p->raise_wait_s) { cur++; p->fits_higher_s = 0; p->since_raise_s = 0; }
     } else p->fits_higher_s = 0;

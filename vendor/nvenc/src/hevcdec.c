@@ -69,15 +69,41 @@ int hevcdec_open(HevcDec *d, Rm *rm, unsigned maxW, unsigned maxH, int bit_depth
         { &d->setup, 0x2000 }, { &d->bs, d->auCap + 0x1000 }, { &d->scaling, 0x1000 }, { &d->tiles, 0x1000 },
         { &d->filter, flt }, { &d->coloc, d->colmv_size * HEVC_SURFACES }, { &d->intra, (size_t)d->maxW * 8 * (size_t)d->bps },
         { &d->slinfo, 0x10000 }, { &d->status, 0x1000 }, { &d->sem, 0x1000 } };
+    // Where the pictures live. In system memory NVDEC reads its references and writes its output across the bus: 8.5 ms
+    // for a 4K 10-bit picture on an RTX 5060 Ti. In video memory it needs 1.5 ms, and the copy engine moves the finished
+    // picture to a staging buffer in system memory for the CPU (cecopy.h; 3.5 ms, on another engine). bit 0: the
+    // pictures, bit 1: the engine's own work buffers too. Default: both on Blackwell (where it was measured), neither
+    // elsewhere; NVDEC_VIDMEM=0..3 replaces that. Anything that cannot be had in video memory falls back to system memory.
+    const char *ve = getenv("NVDEC_VIDMEM");
+    int vm = ve ? atoi(ve) & 3 : rm_class(rm, RM_CLS_NVDEC) == NVDEC_CLASS_BLACKWELL ? 3 : 0;
+    const size_t ch = chroma_format == 1 ? d->maxH / 2 : d->maxH;
+    const size_t luma = (nvenc_in_plane_size(d->pitch, d->maxH) + 65536 + 0xfff) & ~(size_t)0xfff,
+                 chroma = (nvenc_in_plane_size(d->pitch * (chroma_format == 3 ? 2 : 1), ch) + 65536 + 0xfff) & ~(size_t)0xfff;
+    pthread_mutex_init(&d->stageLock, NULL);
+    if (vm & 1) {
+        if (ce_open(rm, &d->ce)) vm = 0;
+        else if (rm_mem_alloc(rm, &d->stageY, luma, 0x1000, true, true, true) || rm_mem_alloc(rm, &d->stageC, chroma, 0x1000, true, true, true)) {
+            rm_mem_free(rm, &d->stageY); rm_mem_free(rm, &d->stageC); ce_close(rm, &d->ce); vm = 0;
+        }
+    } else vm = 0;
     for (size_t i = 0; i < sizeof b / sizeof b[0]; i++) {
-        if (rm_mem_alloc(rm, b[i].m, (b[i].size + 0xfff) & ~(size_t)0xfff, 0x1000, true, true, true)) { fprintf(stderr, "hevcdec: alloc failed\n"); return -1; }
+        const bool work = (vm & 2) && (b[i].m == &d->filter || b[i].m == &d->coloc || b[i].m == &d->intra);
+        const size_t n = (b[i].size + 0xfff) & ~(size_t)0xfff;
+        if (work && rm_mem_alloc(rm, b[i].m, n, 0x1000, false, true, true) == NV_OK) { memset(b[i].m->cpu, 0, b[i].m->size); continue; }
+        if (work) rm_mem_free(rm, b[i].m);
+        if (rm_mem_alloc(rm, b[i].m, n, 0x1000, true, true, true)) { fprintf(stderr, "hevcdec: alloc failed\n"); return -1; }
         memset(b[i].m->cpu, 0, b[i].m->size);
     }
-    const size_t ch = chroma_format == 1 ? d->maxH / 2 : d->maxH;
-    const size_t luma = nvenc_in_plane_size(d->pitch, d->maxH) + 65536, chroma = nvenc_in_plane_size(d->pitch * (chroma_format == 3 ? 2 : 1), ch) + 65536;
-    for (int i = 0; i < HEVC_SURFACES; i++)
-        if (rm_mem_alloc(rm, &d->luma[i], (luma + 0xfff) & ~(size_t)0xfff, 0x1000, true, true, true) ||
-            rm_mem_alloc(rm, &d->chroma[i], (chroma + 0xfff) & ~(size_t)0xfff, 0x1000, true, true, true)) { fprintf(stderr, "hevcdec: surface alloc failed\n"); return -1; }
+    for (int pass = 0; pass < 2; pass++) {
+        const bool sys = !(vm & 1); int i = 0;
+        for (; i < HEVC_SURFACES; i++)
+            if (rm_mem_alloc(rm, &d->luma[i], luma, 0x1000, sys, true, true) || rm_mem_alloc(rm, &d->chroma[i], chroma, 0x1000, sys, true, true)) break;
+        if (i == HEVC_SURFACES) break;
+        for (int k = 0; k <= i; k++) { rm_mem_free(rm, &d->luma[k]); rm_mem_free(rm, &d->chroma[k]); }
+        if (sys) { fprintf(stderr, "hevcdec: surface alloc failed\n"); return -1; }
+        rm_mem_free(rm, &d->stageY); rm_mem_free(rm, &d->stageC); ce_close(rm, &d->ce); vm = 0;   // not enough video memory: as before
+    }
+    d->vid = (vm & 1) != 0;
     if (rm_class(rm, RM_CLS_NVDEC) == NVDEC_CLASS_BLACKWELL) {
         if (rm_mem_alloc(rm, &d->inter_scratch, NVCFB0_INTER_SCRATCH_SIZE(d->maxW, d->maxH), 0x1000, true, true, true)) { fprintf(stderr, "hevcdec: alloc failed\n"); return -1; }
         memset(d->inter_scratch.cpu, 0, d->inter_scratch.size);
@@ -93,6 +119,7 @@ void hevcdec_close(HevcDec *d)
     for (size_t i = 0; i < sizeof m / sizeof m[0]; i++) rm_mem_free(d->rm, m[i]);
     for (int i = 0; i < HEVC_SURFACES; i++) { rm_mem_free(d->rm, &d->luma[i]); rm_mem_free(d->rm, &d->chroma[i]); }
     if (d->inter_scratch.size) rm_mem_free(d->rm, &d->inter_scratch);
+    if (d->vid) { ce_close(d->rm, &d->ce); rm_mem_free(d->rm, &d->stageY); rm_mem_free(d->rm, &d->stageC); d->vid = false; }
     free(d->au); d->au = NULL;
 }
 
@@ -105,43 +132,71 @@ static unsigned sample(const uint8_t *p, int gob, size_t x, size_t y, size_t pit
     return (unsigned)(p[o] | p[o + 1] << 8) >> shift;
 }
 
+// the planes of a decoded picture where the CPU can read them: the picture itself, or, when pictures are in video
+// memory, the staging buffers after the copy engine has filled them (rows: luma rows needed, from the top)
+static void planes(HevcDec *d, int surf, unsigned rows, const uint8_t **L, const uint8_t **C)
+{
+    *L = d->luma[surf].cpu; *C = d->chroma[surf].cpu;
+    if (!d->vid) return;
+    const size_t cp = d->chroma_format == 3 ? 2 * d->pitch : d->pitch, crows = d->chroma_format == 3 ? rows : (rows + 1) / 2;
+    size_t ln = (nvenc_in_plane_size(d->pitch, rows) + 0xfff) & ~(size_t)0xfff, cn = (nvenc_in_plane_size(cp, crows) + 0xfff) & ~(size_t)0xfff;
+    if (ln > d->stageY.size) ln = d->stageY.size;
+    if (cn > d->stageC.size) cn = d->stageC.size;
+    struct timespec t0, t1; clock_gettime(CLOCK_MONOTONIC, &t0);
+    ce_queue(&d->ce, d->luma[surf].gpu, d->stageY.gpu, ln, false);
+    ce_queue(&d->ce, d->chroma[surf].gpu, d->stageC.gpu, cn, true);
+    if (!ce_run(&d->ce)) { fprintf(stderr, "hevcdec: copy engine did not finish (error 0x%x): reading video memory\n", chan_error(&d->ce.ch)); return; }
+    clock_gettime(CLOCK_MONOTONIC, &t1); d->ce_ms = (t1.tv_sec - t0.tv_sec) * 1e3 + (t1.tv_nsec - t0.tv_nsec) / 1e6;
+    if (getenv("NVDEC_CE_LOG")) fprintf(stderr, "hevcdec: copy engine %.2f ms for %zu KB\n", d->ce_ms, (ln + cn) >> 10);
+    *L = d->stageY.cpu; *C = d->stageC.cpu;
+}
+
 void hevcdec_read_nv12(HevcDec *d, int surf, uint8_t *y, size_t ystride, uint8_t *uv, size_t uvstride, unsigned w, unsigned h, unsigned x0, unsigned y0)
 {
     const size_t b = (size_t)d->bps, cp = d->chroma_format == 3 ? 2 * d->pitch : d->pitch;
     const unsigned cw = d->chroma_format == 3 ? w : (w + 1) / 2, ch = d->chroma_format == 3 ? h : (h + 1) / 2;
+    const uint8_t *L, *C; if (d->vid) pthread_mutex_lock(&d->stageLock);
+    planes(d, surf, y0 + h, &L, &C);
     if (!x0 && !y0) {
-        gob_untile_plane(d->gobY, y, ystride, d->luma[surf].cpu, w * b, h, d->pitch);
-        gob_untile_plane(d->gobC, uv, uvstride, d->chroma[surf].cpu, 2 * cw * b, ch, cp);
+        gob_untile_plane(d->gobY, y, ystride, L, w * b, h, d->pitch);
+        gob_untile_plane(d->gobC, uv, uvstride, C, 2 * cw * b, ch, cp);
+        if (d->vid) pthread_mutex_unlock(&d->stageLock);
         return;
     }
     // a conformance window that crops the left / top: sample by sample (rare)
     const unsigned cx0 = d->chroma_format == 3 ? x0 : x0 / 2, cy0 = d->chroma_format == 3 ? y0 : y0 / 2;
     for (unsigned r = 0; r < h; r++) for (unsigned x = 0; x < w; x++) for (size_t k = 0; k < b; k++)
-        y[r * ystride + x * b + k] = ((const uint8_t *)d->luma[surf].cpu)[gob_offset(d->gobY, (x0 + x) * b + k, y0 + r, d->pitch)];
+        y[r * ystride + x * b + k] = L[gob_offset(d->gobY, (x0 + x) * b + k, y0 + r, d->pitch)];
     for (unsigned r = 0; r < ch; r++) for (unsigned x = 0; x < 2 * cw; x++) for (size_t k = 0; k < b; k++)
-        uv[r * uvstride + x * b + k] = ((const uint8_t *)d->chroma[surf].cpu)[gob_offset(d->gobC, (2 * cx0 + x) * b + k, cy0 + r, cp)];
+        uv[r * uvstride + x * b + k] = C[gob_offset(d->gobC, (2 * cx0 + x) * b + k, cy0 + r, cp)];
+    if (d->vid) pthread_mutex_unlock(&d->stageLock);
 }
 
 void hevcdec_read_nv12_8bit(HevcDec *d, int surf, uint8_t *y, size_t ystride, uint8_t *uv, size_t uvstride, unsigned w, unsigned h, unsigned x0, unsigned y0)
 {
     if (d->bps != 2 || d->chroma_format != 1) { hevcdec_read_nv12(d, surf, y, ystride, uv, uvstride, w, h, x0, y0); return; }
     const unsigned cw = (w + 1) / 2, ch = (h + 1) / 2;
+    const uint8_t *L, *C; if (d->vid) pthread_mutex_lock(&d->stageLock);
+    planes(d, surf, y0 + h, &L, &C);
     if (!x0 && !y0) {
-        gob_untile_plane_narrow(d->gobY, y, ystride, d->luma[surf].cpu, (size_t)w * 2, h, d->pitch);
-        gob_untile_plane_narrow(d->gobC, uv, uvstride, d->chroma[surf].cpu, (size_t)cw * 4, ch, d->pitch);
+        gob_untile_plane_narrow(d->gobY, y, ystride, L, (size_t)w * 2, h, d->pitch);
+        gob_untile_plane_narrow(d->gobC, uv, uvstride, C, (size_t)cw * 4, ch, d->pitch);
+        if (d->vid) pthread_mutex_unlock(&d->stageLock);
         return;
     }
     // cropped on the left / top (rare): sample by sample, rounded as gob_untile_plane_narrow rounds
     #define N8(p, o) ((uint8_t)(((unsigned)((p)[o] | (p)[(o) + 1] << 8) + 0x80) > 0xffff ? 0xff : ((unsigned)((p)[o] | (p)[(o) + 1] << 8) + 0x80) >> 8))
-    const uint8_t *L = d->luma[surf].cpu, *C = d->chroma[surf].cpu;
     for (unsigned r = 0; r < h; r++) for (unsigned x = 0; x < w; x++) y[r * ystride + x] = N8(L, gob_offset(d->gobY, 2 * (x0 + x), y0 + r, d->pitch));
     for (unsigned r = 0; r < ch; r++) for (unsigned x = 0; x < 2 * cw; x++) uv[r * uvstride + x] = N8(C, gob_offset(d->gobC, 2 * (x0 / 2 * 2 + x), y0 / 2 + r, d->pitch));
     #undef N8
+    if (d->vid) pthread_mutex_unlock(&d->stageLock);
 }
 
 void hevcdec_read_yuv(HevcDec *d, int surf, uint8_t *dst, const int crop[4], unsigned w, unsigned h)
 {
-    const uint8_t *L = d->luma[surf].cpu, *C = d->chroma[surf].cpu;
+    const uint8_t *L, *C;
+    if (d->vid) pthread_mutex_lock(&d->stageLock);
+    planes(d, surf, (unsigned)crop[2] + h, &L, &C);
     const int sx = d->chroma_format == 3 ? 0 : 1, sy = d->chroma_format == 1 ? 1 : 0;
     const unsigned cw = (w + (unsigned)sx) >> sx, ch = (h + (unsigned)sy) >> sy, x0 = (unsigned)crop[0], y0 = (unsigned)crop[2];
     const int b = d->bps, sh = b == 2 ? 16 - d->bit_depth : 0;   // 10/12-bit samples MSB-aligned (like P010)
@@ -153,6 +208,7 @@ void hevcdec_read_yuv(HevcDec *d, int surf, uint8_t *dst, const int crop[4], uns
         PUT(uo + (size_t)y * cw + x, sample(C, d->gobC, 2 * cx, cy, d->pitch * (d->chroma_format == 3 ? 2 : 1), b, sh));
         PUT(vo + (size_t)y * cw + x, sample(C, d->gobC, 2 * cx + 1, cy, d->pitch * (d->chroma_format == 3 ? 2 : 1), b, sh));
     }
+    if (d->vid) pthread_mutex_unlock(&d->stageLock);
     #undef PUT
 }
 

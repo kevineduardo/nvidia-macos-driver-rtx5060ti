@@ -4,8 +4,10 @@
 // engine parses the slice segment headers and slice data itself. Headers only: open-gpu-doc's nvdec_drv.h / clc9b0.h and
 // ITU-T H.265; what the headers do not say is in docs/tasks.md (M11).
 #pragma once
+#include <pthread.h>
 #include "rm.h"
 #include "channel.h"
+#include "cecopy.h"
 #include "hevcparse.h"
 
 enum { HEVC_SURFACES = 16 };      // picture slots: the engine's reference arrays have 16 entries
@@ -20,6 +22,8 @@ typedef struct {
     RmMem setup, bs, scaling, tiles, filter, coloc, intra, slinfo, status, sem;
     size_t colmv_size, flt_sao, flt_bsd, flt_above, flt_sao_above, flt_edge;
     RmMem luma[HEVC_SURFACES], chroma[HEVC_SURFACES];
+    bool vid; CeCopy ce; RmMem stageY, stageC; pthread_mutex_t stageLock;   // pictures in video memory, read out through the copy engine (cecopy.h)
+    double ce_ms;
     // per surface
     int poc[HEVC_SURFACES];
     int ref[HEVC_SURFACES];         // 0 unused for reference, 1 short-term, 2 long-term

@@ -15,7 +15,8 @@
 #include "ctrl/ctrl906f.h"
 #include "ctrl/ctrlc36f.h"
 
-#define CHK(x) do { NV_STATUS s_ = (x); if (s_) { fprintf(stderr, "chan: %s -> 0x%x\n", #x, s_); return s_; } } while (0)
+_Thread_local bool chan_quiet;
+#define CHK(x) do { NV_STATUS s_ = (x); if (s_) { if (!chan_quiet) fprintf(stderr, "chan: %s -> 0x%x\n", #x, s_); return s_; } } while (0)
 
 NV_STATUS chan_create(Rm *rm, Chan *c, NvU32 engineType, NvU32 objClass, void *objParams)
 {

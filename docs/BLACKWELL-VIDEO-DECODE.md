@@ -141,6 +141,30 @@ Tried and not kept: non-temporal stores in the copy out (pictures shown +3%, CPU
 to run spread). The spin in `chan_wait` now pauses between reads (`_mm_pause`), which leaves the engine wait's
 timing as it was.
 
+### Pictures in video memory, read out through the copy engine (HEVC)
+
+The decoders allocated their pictures in system memory, so that the CPU could read them. NVDEC then reads every
+reference block and writes every output block across the bus. Measured on 4K HEVC (`NVENCVT_LOG=1`, "per frame"):
+
+| pictures in | engine, 10-bit | copy out, 10-bit | total | engine, 8-bit | total, 8-bit |
+|---|---|---|---|---|---|
+| system memory (`NVDEC_VIDMEM=0`) | 8.5 ms | 5.0 ms | 13.8 ms | 5.0 ms | 7.9 ms |
+| video memory, read through the BAR mapping | 1.9 ms | 697 ms | 700 ms | | |
+| video memory + copy engine (default on Blackwell) | 1.5 ms | 8.4 ms (3.5 copy engine + the untile) | 10.2 ms | 1.5 ms | 6.0 ms |
+
+The CPU cannot read video memory (no mapping cache mode changes that), so `src/cecopy.h` opens a channel on a copy
+engine and copies each finished picture to a staging buffer in system memory, which is untiled as before. Bit-exact
+(matrix and JCT-VC streams). Not every copy engine instance runs methods from a channel of its own: on the RTX 5060 Ti
+instance 0 accepts them and never completes, 4 and 7 work; `ce_open` copies one page on each candidate and keeps the
+first that delivers it. Bit 1 of `NVDEC_VIDMEM` puts the engine's filter, co-located and intra buffers in video memory
+too (1.8 -> 1.5 ms). Without a copy engine, or without the video memory (17 pictures: about 600 MB for 4K 10-bit),
+everything is allocated as before. H.264, VP9 and AV1 still keep their pictures in system memory.
+
+In real time the gain is the engine's: two 4K 240 fps streams (two processes) went from 31 + 31 pictures a second with
+a third of the steps doubled to about 50 + 50, nearly all steps of 4; in one process both hold sub-layers 0..2. With
+the engine this cheap the pacing went up to 120 pictures a second, which the player could not show (44 a second,
+uneven): the pacing now stops at 60 (`max_fps`).
+
 ## Performance (AVFoundation, RTX 5060 Ti)
 
 | stream | fps | per picture inside the decoder |

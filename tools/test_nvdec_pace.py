@@ -35,7 +35,7 @@ HARNESS = r'''
 // argv: realtime cost_ms fps groups maxtid, then one group of pictures in decoding order as "type:tid:pos" (pos: the
 // picture's place in output order within its group); a group is `len` pictures long in stream time. An IDR comes first.
 int main(int c, char **v) {
-    NvPace p; nvpace_init(&p);
+    NvPace p; nvpace_init(&p); p.max_fps = getenv("MAXFPS") ? atof(getenv("MAXFPS")) : 0;   // the load rules are tested without the cap
     const int rt = atoi(v[1]); double cost = atof(v[2]); const double fps = atof(v[3]); const int groups = atoi(v[4]), maxtid = atoi(v[5]);
     const int np = c - 6; int i = 0;
     printf("%d %d %d %d %d %.6f\n", i++, 19, 0, nvpace_take(&p, 19, 0, rt, 0, 1 / fps), p.decoding, 0.0); nvpace_measured(&p, cost);
@@ -71,9 +71,10 @@ with tempfile.TemporaryDirectory() as d:
     if r.returncode:
         print(f'{fails} failed'); sys.exit(1)
 
-    def run(rt, cost, groups, pattern, cost2=None, maxtid=7, fps=240):
+    def run(rt, cost, groups, pattern, cost2=None, maxtid=7, fps=240, maxfps=None):
         import os
-        env = dict(os.environ); env.pop('COST2', None)
+        env = dict(os.environ); env.pop('COST2', None); env.pop('MAXFPS', None)
+        if maxfps is not None: env['MAXFPS'] = str(maxfps)
         if cost2 is not None: env['COST2'] = str(cost2)
         out = subprocess.run([str(d / 'h'), str(rt), str(cost), str(fps), str(groups), str(maxtid)] + pattern, capture_output=True, text=True, env=env).stdout
         return [(int(a), int(b), int(c), int(e), int(f), float(g)) for a, b, c, e, f, g in (l.split() for l in out.split('\n') if l.strip())]
@@ -96,6 +97,11 @@ with tempfile.TemporaryDirectory() as d:
           {r[2] for r in tail if r[3]} == {0, 1} and spacing(tail) == [8], f'{sorted({r[2] for r in tail if r[3]})} {spacing(tail)}')
     fast = [r for r in run(1, 2.5, 120, AERIAL)[960:] if r[3]]
     check('a decoder at 2.5 ms a picture keeps every sub-layer', {r[2] for r in fast} == {0, 1, 2, 3, 4})
+    capped = run(1, 2.5, 120, AERIAL, maxfps=60)
+    check('with the 60 a second cap the same decoder keeps sub-layers 0..2, evenly: every 4th picture',
+          {r[2] for r in capped[len(capped) // 2:] if r[3]} == {0, 1, 2} and spacing(capped[len(capped) // 2:]) == [4],
+          f'{sorted({r[2] for r in capped[len(capped) // 2:] if r[3]})} {spacing(capped[len(capped) // 2:])}')
+    check('the cap is the default', 'p->max_fps = 60' in (root / 'vendor/nvenc/vt/nvdec_pace.h').read_text())
     slow = [r for r in run(1, 60, 120, AERIAL)[960:] if r[3]]
     check('a decoder at 60 ms keeps sub-layer 0 alone', {r[2] for r in slow} == {0}, str(sorted({r[2] for r in slow})))
 

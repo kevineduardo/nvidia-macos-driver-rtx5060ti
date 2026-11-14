@@ -18,7 +18,7 @@ typedef struct {
     nv_ioctl_card_info_t card;
     NvU32 nextHandle;                 // handles for objects we allocate
     bool verbose;
-    NvU32 cls[4]; bool clsRead;       // rm_class: the classes this GPU has, read once
+    NvU32 cls[5]; bool clsRead;       // rm_class: the classes this GPU has, read once
 } Rm;
 
 int  rm_open(Rm *rm);                                                    // client + device + subdevice; 0 = ok
@@ -30,7 +30,7 @@ NV_STATUS rm_ctrl(Rm *rm, NvHandle obj, NvU32 cmd, void *params, NvU32 size);
 // The newest class of each kind this GPU offers (NV0080_CTRL_CMD_GPU_GET_CLASSLIST_V2, read once): Ada / Ampere use
 // NVENC 0xc9b7 / NVDEC 0xc9b0 / AMPERE_CHANNEL_GPFIFO_A / AMPERE_USERMODE_A; the GTX 1650 (TU117) has NVENC 0xb4b7, NVDEC
 // 0xc4b0 and the Turing host classes. 0 = none.
-enum { RM_CLS_NVENC, RM_CLS_NVDEC, RM_CLS_CHANNEL, RM_CLS_USERMODE };
+enum { RM_CLS_NVENC, RM_CLS_NVDEC, RM_CLS_CHANNEL, RM_CLS_USERMODE, RM_CLS_COPY };
 NvU32 rm_class(Rm *rm, int kind);
 int rm_esc(Rm *rm, io_connect_t conn, NvU32 cmd, void *data, size_t size);
 

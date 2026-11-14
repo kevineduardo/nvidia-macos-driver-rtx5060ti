@@ -18,6 +18,7 @@ typedef struct {
 } Chan;
 
 // engineType: NV2080_ENGINE_TYPE_*; objClass/objParams: the engine object (e.g. 0xc9b7 + NV_NVENC_ALLOCATION_PARAMETERS)
+extern _Thread_local bool chan_quiet;            // this thread's chan_create failures print nothing (probing for an engine)
 NV_STATUS chan_create(Rm *rm, Chan *c, NvU32 engineType, NvU32 objClass, void *objParams);
 void chan_destroy(Chan *c);
 // incrementing method header + data: method byte offset, on subchannel subch

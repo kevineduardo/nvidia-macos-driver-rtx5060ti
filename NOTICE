@@ -112,7 +112,7 @@ rtx5060ti fork additions  MIT, Copyright (c) 2026 kevineduardo (licenses/rtx5060
              docs/BLACKWELL-VIDEO-DECODE.md, docs/SHADER-CACHE-TAG.md, plugin/nvmtl_translator_tag.h,
              tools/test_translator_tag.py, tools/translator_tag.c, tools/migrate_shader_cache_tag.sh,
              tools/install_bundle_file.sh, tools/nvenc-run/, build/build_plugin_release_local.sh,
-             vendor/nvenc/src/nvdec_blackwell.h, vendor/nvenc/vt/nvdec_pace.h, tools/test_nvdec_pace.py, and the fork's
+             vendor/nvenc/src/nvdec_blackwell.h, vendor/nvenc/src/cecopy.h, vendor/nvenc/vt/nvdec_pace.h, tools/test_nvdec_pace.py, and the fork's
              changes inside vendor/nvenc
              (MIT like the library they change). The Blackwell NVDEC values they use are facts of the hardware interface,
              cross-checked against the AROS nvgfx driver, cagedbird043/nvrm and tinygrad (MIT); no code was taken from them.

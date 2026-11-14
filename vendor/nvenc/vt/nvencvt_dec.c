@@ -373,7 +373,7 @@ static OSStatus start_hevc(DState *s, VTVideoDecoderSession session, CMVideoForm
                                             : (full ? kCVPixelFormatType_444YpCbCr10BiPlanarFullRange : kCVPixelFormatType_444YpCbCr10BiPlanarVideoRange))
                               : (depth == 8 ? (full ? kCVPixelFormatType_420YpCbCr8BiPlanarFullRange : kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange)
                                             : (full ? kCVPixelFormatType_420YpCbCr10BiPlanarFullRange : kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange));
-    nvpace_init(&s->pace);   // every temporal sub-layer until the decoder is seen not to keep up in real time
+    nvpace_init(&s->pace); { const char *mf = getenv("NVDEC_PACE_MAX_FPS"); if (mf) s->pace.max_fps = atof(mf); }   // every temporal sub-layer until the decoder is seen not to keep up in real time
     return set_output(s, session, fmt, pf, full);
 }
 
