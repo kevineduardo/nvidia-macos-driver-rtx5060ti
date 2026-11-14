@@ -1138,6 +1138,12 @@ uint32_t nvmtl_function_spv_fnv(id f)
 }
 // The first 8 bytes of the sha256 of a function's AIR text, as the pipeline key line prints them: the module key a
 // profile row or a fault-context dispatch is joined to. Computed once per function.
+// The key of one AIR text never changes, but a client that makes a new function object for every use asks for it
+// again each time: VideoToolbox's pixel-transfer session builds its kernel anew for each image, and the whole text was
+// converted and hashed for each one (System Settings > Displays thumbnails: about a quarter of the CPU time of one
+// thumbnail). The key is also kept per AIR string (weak key, so it goes when the text does).
+static NSMapTable<NSString *, NSNumber *> *g_airkey_memo;
+static os_unfair_lock g_airkey_memo_lock = OS_UNFAIR_LOCK_INIT;
 uint64_t nvmtl_function_air_key(id f)
 {
     if (![f isKindOfClass:[NVMTLFunction class]]) return 0;
@@ -1145,10 +1151,21 @@ uint64_t nvmtl_function_air_key(id f)
     NSNumber *h = objc_getAssociatedObject(fn, &kKey);
     if (h) return h.unsignedLongLongValue;
     uint64_t v = 0;
-    if (fn->_air.length) {
-        const char *s = fn->_air.UTF8String; unsigned char dg[CC_SHA256_DIGEST_LENGTH];
-        CC_SHA256(s, (CC_LONG)strlen(s), dg);
-        for (int i = 0; i < 8; i++) v = (v << 8) | dg[i];
+    NSString *air = fn->_air;
+    if (air.length) {
+        os_unfair_lock_lock(&g_airkey_memo_lock);
+        if (!g_airkey_memo) g_airkey_memo = [NSMapTable weakToStrongObjectsMapTable];
+        NSNumber *hit = [g_airkey_memo objectForKey:air];
+        os_unfair_lock_unlock(&g_airkey_memo_lock);
+        if (hit) v = hit.unsignedLongLongValue;
+        else {
+            const char *s = air.UTF8String; unsigned char dg[CC_SHA256_DIGEST_LENGTH];
+            CC_SHA256(s, (CC_LONG)strlen(s), dg);
+            for (int i = 0; i < 8; i++) v = (v << 8) | dg[i];
+            os_unfair_lock_lock(&g_airkey_memo_lock);
+            [g_airkey_memo setObject:@(v) forKey:air];
+            os_unfair_lock_unlock(&g_airkey_memo_lock);
+        }
     }
     objc_setAssociatedObject(fn, &kKey, @(v), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     return v;
