@@ -43,6 +43,7 @@ or one step at a time:
 | `psnr.sh <vector>` | per-frame PSNR, to tell garbage (a layout or setup error, ~10 dB) from a near miss | |
 | `stress.sh` | AVAssetReader (asynchronous) x15 per stream: AV1 4K 8/10-bit, VP9 1080p, H.264 4K, HEVC 4K 8/10-bit | `fail=0 late=0` |
 | `narrow_check.sh` | 10-bit read as 8-bit NV12 vs the software decode rounded the same way | `differing samples 0` |
+| `realtime.sh <clip> [streams] [seconds]` | AVPlayer in real time (as a screen saver): pictures shown per second, the steps between them, each compared with the software decode, CPU; `CLOSED=1` for the closed decoder | even steps, `wrong 0` |
 | `compare_hevc.sh [runs]` | our HEVC decoder against NullMoth's closed one, same streams, ffmpeg and AVFoundation | see the doc's table |
 | `swift vt_hw_check.swift` | what VideoToolbox reports as hardware in a process with a Metal device (the installed driver) | all `true` |
 | `trace_closed_push.sh <hevc.mp4>` | dumps and decodes the NVDEC methods NullMoth's closed HEVC decoder sends (how 0x4dc was found) | |

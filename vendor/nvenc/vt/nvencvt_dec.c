@@ -11,6 +11,8 @@
 #include "vp9dec.h"
 #include "av1dec.h"
 #include "hevcdec.h"
+#include "nvdec_pace.h"
+#include "blocklinear.h"
 #include "mpeg2dec.h"
 #include "mpeg4dec.h"
 #include <CoreFoundation/CoreFoundation.h>
@@ -90,6 +92,9 @@ typedef struct {
     // asynchronous output (T8.09): pictures waiting for the output thread (copy, emit, release), in decode order
     struct OutJob { VTVideoDecoderFrame frame; OSStatus res; VTDecodeInfoFlags fl; CVPixelBufferRef pb; int surf, rel; unsigned w, h, cx, cy, usCopy, usEmit; } q[4];
     unsigned qh, qt; bool async, thrOn, stop; pthread_t thr; pthread_cond_t cv;
+    // real-time playback (nvdec_pace.h): the temporal sub-layers an HEVC stream is decoded to when the decoder cannot keep up
+    NvPace pace; VTDecodeFrameFlags curFlags; double curDurS, curPtsS;
+    bool copyCounted;               // this session is counted in nvdec_copy_sessions (from its first picture to its end)
 } DState;
 typedef struct OutJob OutJob;
 
@@ -178,6 +183,7 @@ static OSStatus b_invalidate(CMBaseObjectRef o)
 {
     DState *s = dstate(o); if (!s) return noErr;
     pthread_mutex_lock(&s->lock);
+    if (s->copyCounted) { s->copyCounted = false; nvdec_copy_sessions(-1); }
     if (s->thrOn && !pthread_equal(pthread_self(), s->thr)) {   // the waiting pictures out, then the output thread ends
         out_drain(s);
         s->stop = true; pthread_cond_broadcast(&s->cv);
@@ -199,6 +205,8 @@ static OSStatus b_invalidate(CMBaseObjectRef o)
     if (s->frames) DLOG("per frame: decodeFrame %.2f ms (engine %.2f, pool %.2f, copy %.2f, emit %.2f), outside %.2f ms",
          s->tIn / s->frames, s->tEngine / s->frames, s->tPool / s->frames, s->tCopy / s->frames, s->tEmit / s->frames, s->tOut / s->frames);
     DLOG("invalidate after %u frames, %u errors", s->frames, s->errors);
+    if (s->pace.dropped) DLOG("pace: %lu pictures decoded, %lu left out by temporal sub-layer (now decoding sub-layers 0..%d; %.1f ms a picture)",
+                              s->pace.decoded, s->pace.dropped, s->pace.decoding, s->pace.cost_ms);
     pthread_mutex_unlock(&s->lock);
     return noErr;
 }
@@ -365,6 +373,7 @@ static OSStatus start_hevc(DState *s, VTVideoDecoderSession session, CMVideoForm
                                             : (full ? kCVPixelFormatType_444YpCbCr10BiPlanarFullRange : kCVPixelFormatType_444YpCbCr10BiPlanarVideoRange))
                               : (depth == 8 ? (full ? kCVPixelFormatType_420YpCbCr8BiPlanarFullRange : kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange)
                                             : (full ? kCVPixelFormatType_420YpCbCr10BiPlanarFullRange : kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange));
+    nvpace_init(&s->pace);   // every temporal sub-layer until the decoder is seen not to keep up in real time
     return set_output(s, session, fmt, pf, full);
 }
 
@@ -459,6 +468,21 @@ static OSStatus d_startSession(VTVideoDecoderRef o, VTVideoDecoderSession sessio
 }
 
 // The pixel buffer attributes for the session (our format, the range the stream says) and the colour attachments
+// The pixel format the client's destination attributes ask for: `pf` when it is the one asked for or is in the list
+// asked for, else the single format asked for, else 0 (none named, or a list without `pf`).
+static OSType dest_format(CFDictionaryRef dst, OSType pf)
+{
+    CFTypeRef v = dst ? CFDictionaryGetValue(dst, kCVPixelBufferPixelFormatTypeKey) : NULL; OSType one = 0;
+    if (!v) return 0;
+    if (CFGetTypeID(v) == CFNumberGetTypeID()) return CFNumberGetValue(v, kCFNumberSInt32Type, &one) ? one : 0;
+    if (CFGetTypeID(v) != CFArrayGetTypeID()) return 0;
+    for (CFIndex i = 0, n = CFArrayGetCount(v); i < n; i++) {
+        CFTypeRef e = CFArrayGetValueAtIndex(v, i);
+        if (e && CFGetTypeID(e) == CFNumberGetTypeID() && CFNumberGetValue(e, kCFNumberSInt32Type, &one) && one == pf) return pf;
+    }
+    return 0;
+}
+
 static OSStatus set_output(DState *s, VTVideoDecoderSession session, CMVideoFormatDescriptionRef fmt, OSType pf, bool full)
 {
     OSStatus st;
@@ -468,10 +492,10 @@ static OSStatus set_output(DState *s, VTVideoDecoderSession session, CMVideoForm
     if ((s->codec == CODEC_VP9 || s->codec == CODEC_AV1 || s->codec == kCMVideoCodecType_HEVC) && !getenv("NVDEC_NONARROW") &&
         (pf == kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange || pf == kCVPixelFormatType_420YpCbCr10BiPlanarFullRange)) {
         CFDictionaryRef dst = VTDecoderSessionGetDestinationPixelBufferAttributes(session);
-        CFNumberRef dpf = dst ? CFDictionaryGetValue(dst, kCVPixelBufferPixelFormatTypeKey) : NULL; OSType want = 0;
         const OSType eight = pf == kCVPixelFormatType_420YpCbCr10BiPlanarFullRange ? kCVPixelFormatType_420YpCbCr8BiPlanarFullRange
                                                                                  : kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange;
-        if (dpf && CFGetTypeID(dpf) == CFNumberGetTypeID() && CFNumberGetValue(dpf, kCFNumberSInt32Type, &want) && want == eight) {
+        // only when the client did not also accept the picture's own 10-bit format
+        if (dest_format(dst, pf) != pf && dest_format(dst, eight) == eight) {
             DLOG("10-bit stream, 8-bit client: narrowed while untiled");
             pf = eight;
         }
@@ -494,9 +518,12 @@ static OSStatus set_output(DState *s, VTVideoDecoderSession session, CMVideoForm
     // IOSurfaces: 18.7 ms per 4K frame).
     CFDictionaryRef dst = VTDecoderSessionGetDestinationPixelBufferAttributes(session);
     if (dst) CFRetain(dst);   // also for our own pool below (released at its end)
-    CFNumberRef dpf = dst ? CFDictionaryGetValue(dst, kCVPixelBufferPixelFormatTypeKey) : NULL; OSType want = 0;
-    if (!getenv("NVDEC_OWNATTRS") && dpf && CFGetTypeID(dpf) == CFNumberGetTypeID() && CFNumberGetValue(dpf, kCFNumberSInt32Type, &want) && want == pf) {
+    // the client's format: one number, or a list (AVPlayerItemVideoOutput and CoreAnimation's image queue give a list even
+    // of one); ours counts as asked for when it is in the list
+    OSType want = dest_format(dst, pf);
+    if (!getenv("NVDEC_OWNATTRS") && want == pf) {
         CFMutableDictionaryRef m = CFDictionaryCreateMutableCopy(NULL, 0, dst);
+        CFDictionarySetValue(m, kCVPixelBufferPixelFormatTypeKey, npf);   // one format: a pool cannot be made from a list
         CFDictionarySetValue(m, kCVPixelBufferWidthKey, nw); CFDictionarySetValue(m, kCVPixelBufferHeightKey, nh);
         if (!CFDictionaryContainsKey(m, kCVPixelBufferIOSurfacePropertiesKey)) CFDictionarySetValue(m, kCVPixelBufferIOSurfacePropertiesKey, ios);
         CFRelease(attrs); attrs = m;
@@ -526,8 +553,10 @@ static OSStatus set_output(DState *s, VTVideoDecoderSession session, CMVideoForm
         if (fits) {
             CFMutableDictionaryRef m = CFDictionaryCreateMutableCopy(NULL, 0, dst);   // the size made explicit (a pool needs one)
             CFNumberRef w2 = CFNumberCreate(NULL, kCFNumberIntType, &s->w), h2 = CFNumberCreate(NULL, kCFNumberIntType, &s->h);
+            CFNumberRef f2 = CFNumberCreate(NULL, kCFNumberSInt32Type, &pf);
             CFDictionarySetValue(m, kCVPixelBufferWidthKey, w2); CFDictionarySetValue(m, kCVPixelBufferHeightKey, h2);
-            CFRelease(w2); CFRelease(h2);
+            CFDictionarySetValue(m, kCVPixelBufferPixelFormatTypeKey, f2);              // and one format, when the client gave a list
+            CFRelease(w2); CFRelease(h2); CFRelease(f2);
             CVPixelBufferPoolRef pool = NULL;
             if (CVPixelBufferPoolCreate(kCFAllocatorDefault, NULL, m, &pool) == kCVReturnSuccess && pool) s->ownPool = pool;
             else if (pool) CVPixelBufferPoolRelease(pool);
@@ -739,13 +768,33 @@ static OSStatus decode_hevc(DState *s, VTVideoDecoderFrame frame, const uint8_t 
 {
     HevcDec *d = s->hevc; int r = 0; OSStatus res = noErr;
     size_t pos = 0; const uint8_t *nal; size_t n;
+    {   // In real-time playback a decoder that cannot keep up leaves out whole temporal sub-layers (nvdec_pace.h) instead
+        // of letting the player drop pictures in bursts. The picture's type and TemporalId are its first VCL NAL unit's.
+        // NVDEC_NO_PACE=1: every picture is decoded.
+        int type = -1, tid = 0; size_t q = 0;
+        while (type < 0 && hevc_next_lenpfx(p, len, s->nalLen, &q, &nal, &n)) if (n >= 2 && ((nal[0] >> 1) & 63) < 32) { type = (nal[0] >> 1) & 63; tid = (nal[1] & 7) - 1; }
+        const bool rt = (s->curFlags & kVTDecodeFrame_1xRealTimePlayback) && !getenv("NVDEC_NO_PACE");
+        if (gDLog && type >= 0) {   // diagnostics: one line per 240 input pictures, and one when the sub-layers decoded change
+            static _Thread_local int lastDec = -2; const unsigned long seen = s->pace.decoded + s->pace.dropped;
+            if (seen && seen % 240 == 0) DLOG("pace: %lu in, %lu decoded, sub-layers 0..%d (limit %d), %.1f ms a picture, load of 0..2 %.2f of all %.2f, realtime %d",
+                                              seen, s->pace.decoded, s->pace.decoding, s->pace.limit, s->pace.cost_ms, nvpace_load(&s->pace, 2), nvpace_load(&s->pace, NVPACE_ALL), rt);
+            if (s->pace.decoding != lastDec) { if (lastDec != -2) DLOG("pace: now sub-layers 0..%d (limit %d) at input picture %lu, %.1f ms a picture", s->pace.decoding, s->pace.limit, seen, s->pace.cost_ms); lastDec = s->pace.decoding; }
+        }
+        if (type >= 0 && !nvpace_take(&s->pace, type, tid, rt, s->curPtsS, s->curDurS)) {
+            OutJob j = { .frame = frame, .res = noErr, .fl = kVTDecodeInfo_FrameDropped, .surf = -1, .rel = -1 };
+            out_deliver(s, &j);
+            return noErr;
+        }
+    }
+    const double tPace = nowms();
     while (r >= 0 && hevc_next_lenpfx(p, len, s->nalLen, &pos, &nal, &n)) { int q = hevcdec_nal(d, nal, n); if (q) r = q; }
     if (r >= 0) { int q = hevcdec_flush(d); if (q) r = q; }
     if (r < 0) res = kVTVideoDecoderBadDataErr;
     OutJob j = { .frame = frame, .surf = -1, .rel = -1 }; bool out = false;
     if (!res && r == 1) {
         s->tEngine += d->engine_ms;
-        out = d->cur_output; j.rel = d->cur_surf;
+        out = d->cur_output && !(s->curFlags & kVTDecodeFrame_DoNotOutputFrame);   // decoded for its successors only: no copy
+        j.rel = d->cur_surf;
         if (out) {
             j.w = (unsigned)d->cur_w; j.h = (unsigned)d->cur_h; j.cx = (unsigned)d->cur_crop[0]; j.cy = (unsigned)d->cur_crop[2];
             const double tp = nowms();
@@ -758,6 +807,8 @@ static OSStatus decode_hevc(DState *s, VTVideoDecoderFrame frame, const uint8_t 
                                               d->cur_poc, out ? "" : ", not output", d->err_status, d->engine_ms);
     j.res = res; j.fl = (!res && !out) ? kVTDecodeInfo_FrameDropped : 0;
     out_deliver(s, &j);
+    // what this picture cost: the engine, and the wait for room in the output queue when the copies fall behind
+    if (!res && r == 1) nvpace_measured(&s->pace, nowms() - tPace);
     return res;
 }
 
@@ -820,6 +871,10 @@ static OSStatus d_decodeFrame(VTVideoDecoderRef o, VTVideoDecoderFrame frame, CM
     if (info) *info = 0;
     const double tA = nowms();
     pthread_mutex_lock(&s->lock);
+    s->curFlags = flags;
+    if (!s->copyCounted && s->opened) { s->copyCounted = true; nvdec_copy_sessions(1); }
+    { const CMTime du = CMSampleBufferGetDuration(sb), pt = CMSampleBufferGetPresentationTimeStamp(sb);
+      s->curDurS = CMTIME_IS_NUMERIC(du) && du.value > 0 ? CMTimeGetSeconds(du) : 0; s->curPtsS = CMTIME_IS_NUMERIC(pt) ? CMTimeGetSeconds(pt) : 0; }
     // asynchronous output when the client allows it (NVDEC_SYNC=1: never)
     s->async = (flags & kVTDecodeFrame_EnableAsynchronousDecompression) && s->opened && !getenv("NVDEC_SYNC") && out_async_ok(s);
     if (s->async && info) *info |= kVTDecodeInfo_Asynchronous;

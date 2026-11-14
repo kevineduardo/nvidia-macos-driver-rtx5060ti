@@ -4,10 +4,14 @@
 #include "nv_floor.h"
 #include <string.h>
 #include <stdbool.h>
+#include <stdatomic.h>
 #include <dispatch/dispatch.h>
 #include <stdlib.h>
 #include <emmintrin.h>
 #include <Accelerate/Accelerate.h>
+#ifndef NVDEC_COPY_THREADS_DEFAULT
+#define NVDEC_COPY_THREADS_DEFAULT 2
+#endif
 
 size_t bl_offset(size_t x, size_t y, size_t pitch, unsigned bh)
 {
@@ -72,17 +76,35 @@ static void untile_band(uint8_t *dst, size_t dst_stride, const uint8_t *src, siz
     }
     if (full * 64 < width) untile_band_slow(dst, dst_stride, src, full * 64, width, y0, y1, pitch);
 }
+// How many threads copy one plane out. The copy is bound by memory, not by the CPU: on one 4K 10-bit luma plane (16 MB)
+// one thread took 2.1 ms and 2.1 ms of CPU, four took 2.4 ms and 9 ms of CPU, and one block per band on every core
+// (as the Blackwell copy did) 2.2 ms and 22 ms of CPU: three and a half cores for one 4K stream played in real time,
+// one with a thread. In a decoder the planes are not in the cache and a second thread helps a little (a 4K 60 stream
+// kept its pace with two, dipped with one); with two streams decoding in the process (a screen saver on two monitors)
+// one thread each did better than two. So: two threads, one when more than one session is decoding.
+// NVDEC_COPY_THREADS=n (1..8) replaces that.
+static _Atomic int gCopySessions;
+void nvdec_copy_sessions(int delta) { atomic_fetch_add(&gCopySessions, delta); }
+static size_t plane_threads(void)
+{
+    static int env = -1;
+    if (env < 0) { const char *e = getenv("NVDEC_COPY_THREADS"); const int v = e ? atoi(e) : 0; env = v >= 1 && v <= 8 ? v : 0; }
+    return env ? (size_t)env : atomic_load(&gCopySessions) > 1 ? 1 : NVDEC_COPY_THREADS_DEFAULT;
+}
+// bands [0, bands) through `band`, on plane_threads() threads in contiguous runs (small planes on the caller's)
+static void plane_bands(size_t bands, void (^band)(size_t))
+{
+    const size_t n = bands >= 32 ? plane_threads() : 1;
+    if (n <= 1) { for (size_t b = 0; b < bands; b++) band(b); return; }
+    const size_t per = (bands + n - 1) / n;
+    dispatch_apply(n, dispatch_get_global_queue(QOS_CLASS_USER_INTERACTIVE, 0), ^(size_t k) { for (size_t b = k * per; b < (k + 1) * per && b < bands; b++) band(b); });
+}
+
 void nvenc_in_untile_plane(uint8_t *dst, size_t dst_stride, const uint8_t *src, size_t width, size_t rows, size_t pitch)
 {
     size_t bands = (rows + 15) / 16;
     if ((uintptr_t)src & 15) { untile_band_slow(dst, dst_stride, src, 0, width, 0, rows, pitch); return; }
-    if (bands >= 32) {
-        // memory-bound: 4K NV12 into a VideoToolbox pool buffer took 6.7 ms with 1 thread, 4.7 with 2, 3.4 with 4, 3.8 with 6-8 (T11.05)
-        const size_t chunks = 4, per = (bands + chunks - 1) / chunks;
-        dispatch_apply(chunks, dispatch_get_global_queue(QOS_CLASS_USER_INTERACTIVE, 0), ^(size_t k) {
-            for (size_t b = k * per; b < (k + 1) * per && b < bands; b++) untile_band(dst, dst_stride, src, width, b, rows, pitch); });
-    } else
-        for (size_t b = 0; b < bands; b++) untile_band(dst, dst_stride, src, width, b, rows, pitch);
+    plane_bands(bands, ^(size_t b) { untile_band(dst, dst_stride, src, width, b, rows, pitch); });
 }
 
 // ---- the layouts by generation (blocklinear.h) ----
@@ -143,8 +165,7 @@ void gob_untile_plane(int layout, uint8_t *dst, size_t dst_stride, const uint8_t
                 memcpy(dst + y * dst_stride + x, src + gob_offset(layout, x, y, pitch), n);
             }
     };
-    if (bands >= 32) dispatch_apply(bands, dispatch_get_global_queue(QOS_CLASS_USER_INTERACTIVE, 0), band);
-    else for (size_t b = 0; b < bands; b++) band(b);
+    plane_bands(bands, band);
 }
 
 void gob_untile_plane_narrow(int layout, uint8_t *dst, size_t dst_stride, const uint8_t *src, size_t width, size_t rows, size_t pitch)
@@ -170,8 +191,7 @@ void gob_untile_plane_narrow(int layout, uint8_t *dst, size_t dst_stride, const 
         }
         free(tmp);
     };
-    if (bands >= 8) dispatch_apply(bands, dispatch_get_global_queue(QOS_CLASS_USER_INTERACTIVE, 0), band);
-    else for (size_t b = 0; b < bands; b++) band(b);
+    plane_bands(bands, band);
 }
 
 static void tile_band_slow(uint8_t *dst, const uint8_t *src, size_t src_stride, size_t x0, size_t width, size_t y0, size_t y1, size_t pitch)

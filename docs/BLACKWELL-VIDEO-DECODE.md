@@ -89,6 +89,44 @@ picture at 4K 8-bit (3.5 ms against ~6 ms; not explained: not the surfaces' memo
 copy 100 ms, and not the buffers it sets that we do not). Neither failed in 20 AVFoundation runs (the closed one once in
 an earlier set of 10). Ours is rated above it on Blackwell.
 
+## Real-time playback of streams the decoder cannot keep up with
+
+Apple's aerial screen savers are HEVC Main 10, 3840x2160, **240 fps**, five temporal sub-layers (per 16 pictures: 1, 1,
+2, 4, 8). A picture costs the engine 8 ms and the copy out 10 ms; real time gives 4 ms, and the screen saver plays one
+stream per monitor. With NullMoth's closed decoder and with ours the result was judder: the player dropped pictures by
+itself, showing two pictures 1/120 s apart and then jumping 1/15 s, over and over, and `WallpaperAerialsExtension`
+used 3.6 cores. Nothing was decoded wrong: every picture shown matched the software decode.
+
+What was found, with `tools/blackwell-video/realtime.sh` (AVPlayer in real time, each picture shown compared with the
+software decode of the picture with that time):
+
+- VideoToolbox sets **no quality-of-service property** on a third-party decoder (it asks once for
+  `SuggestedQualityOfServiceTiers` and nothing else). Frames come with `kVTDecodeFrame_1xRealTimePlayback` in
+  playback and without it in preroll, AVAssetReader and ffmpeg. So the decoder paces itself (`vt/nvdec_pace.h`):
+  in real time it measures the cost of a picture against the stream's pictures per second in each sub-layer and leaves
+  out the sub-layers it cannot afford, which HEVC allows and which leaves evenly spaced pictures. Down at once; up after
+  1.5 s of room, at a TSA / STSA picture or an IRAP only; a step up that fails doubles the wait before the next (two
+  streams on one engine otherwise went up together and fell back every two seconds). `NVDEC_NO_PACE=1` turns it off.
+- The client's pixel format comes as a **list** (even of one): the decoder took a list for "not my format", used the
+  session's pool and VideoToolbox converted every picture. It now finds its format in the list.
+- `kVTDecodeFrame_DoNotOutputFrame` pictures are decoded and not copied out.
+- **The copy out used every core**: one block per 16-row band on a concurrent queue. The copy is bound by memory: one
+  4K 10-bit luma plane took 2.1 ms on one thread (2.1 ms of CPU) and 2.2 ms on all of them (22 ms of CPU). Now two
+  threads, one each when more than one session decodes in the process (`NVDEC_COPY_THREADS`).
+- Sleeping instead of spinning while the engine works was tried and is worse here: `nanosleep` on that thread comes
+  back milliseconds late (8 ms pictures took 11 to 21).
+
+| real time, aerial clip | pictures shown / s | steps between pictures (1/240 s) | CPU |
+|---|---|---|---|
+| closed decoder, 1 stream | 27 | half 2, half 16 | 3.3 cores |
+| ours before, 1 stream | 28 | half 2, half 16 | 3.6 cores |
+| ours now, 1 stream | 62 | 4 (397 of 425) | 1 to 1.5 cores |
+| closed decoder, 2 streams | 26 + 27 | half 2, half 16 | 3.4 cores each |
+| ours now, 2 streams | ~30 + ~30 | 8 (about 9 in 10), some 16 | 1 core each |
+
+Two 4K streams cannot both run at 60 pictures a second on this card: 120 pictures of 8 ms are all of the one NVDEC
+engine's time. Open: the 16-steps left with two streams, and the first seconds, before the pace settles.
+
 ## Performance (AVFoundation, RTX 5060 Ti)
 
 | stream | fps | per picture inside the decoder |

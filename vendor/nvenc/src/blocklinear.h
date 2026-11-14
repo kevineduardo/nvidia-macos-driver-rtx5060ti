@@ -32,6 +32,9 @@ int gob_layout_for(unsigned nvdecClass, unsigned elemBytes);
 size_t gob_offset(int layout, size_t x, size_t y, size_t pitch);
 // a plane in that layout (pitch) to pitch-linear dst (dst_stride); width in bytes
 void gob_untile_plane(int layout, uint8_t *dst, size_t dst_stride, const uint8_t *src, size_t width, size_t rows, size_t pitch);
+// The plane copies use two threads, or one each while more than one decoding session is active in the process (the
+// decoders report +1 with a session's first picture and -1 at its end). NVDEC_COPY_THREADS overrides.
+void nvdec_copy_sessions(int delta);
 // The same for a plane of 16-bit samples (MSB-aligned, P010-like; width in bytes, so twice the samples), written as
 // 8-bit samples rounded to nearest ((v + 0x80) >> 8, saturating): a 10-bit picture for a client that asked for 8 bits,
 // converted while it is untiled instead of afterwards by VideoToolbox (63 ms per 4K picture there)

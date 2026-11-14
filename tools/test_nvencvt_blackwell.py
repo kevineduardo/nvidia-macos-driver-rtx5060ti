@@ -209,6 +209,13 @@ check('the decoders on Blackwell wait through chan_wait (the doorbell rung again
 dvt = (V / 'vt/nvencvt_dec.c').read_text()
 check('a 10-bit VP9 / AV1 stream for an 8-bit client is narrowed while untiled',
       'narrowed while untiled' in dvt and 'vp9dec_read_nv12_8bit' in dvt and 'av1dec_read_nv12_8bit' in dvt and 'hevcdec_read_nv12_8bit' in dvt)
+check('real-time playback: HEVC pictures above the affordable temporal sub-layer are left out before the engine',
+      'nvpace_take(&s->pace, type, tid, rt, s->curPtsS, s->curDurS)' in dvt and 'kVTDecodeFrame_1xRealTimePlayback' in dvt
+      and 'nvpace_init(&s->pace)' in dvt and 'nvpace_measured(&s->pace' in dvt)
+check('the client\'s pixel format is looked up in a list of formats too', 'static OSType dest_format(' in dvt and 'CFArrayGetTypeID()' in dvt)
+bl = (V / 'src/blocklinear.c').read_text()
+check('the plane copies run on plane_threads() threads, not one block per band on every core',
+      'static void plane_bands(' in bl and bl.count('plane_bands(bands') == 3 and 'dispatch_apply(bands' not in bl)
 h264 = (V / 'src/dec.c').read_text()
 check('the H.264 decoder reads its planes in the card\'s layout, cropped pictures included',
       'nvenc_in_untile_plane' not in h264 and 'nvenc_in_offset' not in h264 and h264.count('gob_offset(d->gob') == 4)

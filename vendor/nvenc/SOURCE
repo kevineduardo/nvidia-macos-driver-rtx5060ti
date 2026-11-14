@@ -59,6 +59,14 @@ Changes made here, in this order of importance:
                    +0x11c, +0x120), planes in the card's layout, chan_wait / chan_done, 8-bit narrowing; registered on
                    Blackwell above NullMoth's closed HEVC decoder (bit-exact on 17 JCT-VC conformance streams; faster
                    through ffmpeg and for 8-bit clients, slower at 4K 8-bit through AVFoundation; see the doc).
+                 - vt/nvdec_pace.h (new), vt/nvencvt_dec.c: in real-time playback (kVTDecodeFrame_1xRealTimePlayback) an
+                   HEVC stream the decoder cannot keep up with is decoded to the temporal sub-layers it can afford,
+                   instead of the player dropping pictures in bursts (Apple's 4K 240 fps aerials: 27 pictures a second in
+                   steps of 2 and 16 became 62 in steps of 4); the client's pixel format is found in a list of formats
+                   (it was taken for another format and VideoToolbox converted every picture);
+                   kVTDecodeFrame_DoNotOutputFrame pictures are not copied out. tools/test_nvdec_pace.py.
+                 - src/blocklinear.c: the plane copies run on two threads (one each while several sessions decode)
+                   instead of one block per band on every core: the same time, a tenth of the CPU.
 
 Where upstream's own facts come from (read before calling this library clean of NVIDIA's closed driver): the decoders'
 picture setups are open-gpu-doc's nvdec_drv.h. The ENCODERS' per-picture control blocks (src/h264enctmpl.h,

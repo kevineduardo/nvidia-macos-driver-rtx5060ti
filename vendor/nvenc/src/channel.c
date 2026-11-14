@@ -5,6 +5,7 @@
 #include <stdarg.h>
 #include <stdio.h>
 #include <string.h>
+#include <stdlib.h>
 #include "class/cl0002.h"
 #include "class/clc56f.h"
 #include "class/clc361.h"
@@ -107,6 +108,8 @@ bool chan_wait(Chan *c, volatile const NvU32 *sem, NvU32 val, double timeout_ms)
 {
     // Spin until the semaphore holds val. A picture still not done after 50 ms (4K takes under 20) gets the doorbell
     // rung again, which only makes the host read GPPut once more: a safety net for a submission it did not see.
+    // Sleeping instead of spinning was tried and is worse here: nanosleep on this thread comes back milliseconds late
+    // (0.1 ms sleeps added 2.6 ms a picture; one sleep of 70% of the usual wait made 8 ms pictures take 15 to 21).
     struct timespec t; NV_CLOCK_GETTIME(CLOCK_MONOTONIC, &t);
     const double t0 = t.tv_sec * 1e3 + t.tv_nsec / 1e6; double kick = t0 + 50, now = t0; unsigned kicks = 0;
     while (*sem != val && now - t0 < timeout_ms) {
