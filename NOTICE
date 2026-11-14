@@ -107,3 +107,9 @@ kexts/NMKbdBacklight  The keyboard backlight plugin follows the structure of Vir
              HALS, SALS), thinkpad_acpi (MLCG, MLCS), dell-laptop and dell-smbios-wmi (Dell SMBIOS keyboard light calls), msi-ec (BeardOverflow/msi-ec, GPL-2.0: the source of the MSI firmware-string table facts and the setter encoding; our code is our own), hid-asus (drivers/hid/hid-asus.c: the ASUS N-KEY handshake and brightness
              feature reports, tools/asus), and OpenRazer (the Razer feature report, tools/razer), which are GPL-2.0, and from the ACPI tables of laptops whose owners sent
              them in. No code was copied from them; the code here is NullMoth's own.
+
+rtx5060ti fork additions  MIT, Copyright (c) 2026 kevineduardo (licenses/rtx5060ti-fork-MIT.txt): tools/blackwell-video/,
+             docs/BLACKWELL-VIDEO-DECODE.md, vendor/nvenc/src/nvdec_blackwell.h, and the fork's changes inside vendor/nvenc
+             (MIT like the library they change). The Blackwell NVDEC values they use are facts of the hardware interface,
+             cross-checked against the AROS nvgfx driver, cagedbird043/nvrm and tinygrad (MIT); no code was taken from them.
+             Changes the fork makes to files that were already in this tree stay under this tree's licence.

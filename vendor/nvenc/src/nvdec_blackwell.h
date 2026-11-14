@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2026 kevineduardo
 // nvdec_blackwell.h: what Blackwell's NVDEC (class 0xcfb0) needs beyond Ada's methods (clc9b0.h).
 // No public header lists the methods of 0xcfb0 (open-gpu-kernel-modules' clcfb0.h names the class alone).
 #pragma once
