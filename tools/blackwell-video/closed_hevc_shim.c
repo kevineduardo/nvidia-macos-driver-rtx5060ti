@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2026 kevineduardo
 // closed_hevc_shim.c: registers NullMoth's closed HEVC decoder in a process it is injected into (rating 2000), so its push buffer can be traced (trace_closed_push.sh)
 #include <dlfcn.h>
 #include <stdio.h>

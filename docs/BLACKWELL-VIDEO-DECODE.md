@@ -5,7 +5,7 @@ State on 2026-11-14, RTX 5060 Ti (GB206, NVDEC class `0xcfb0`), macOS 26.7.2, Nu
 | codec | decoder on Blackwell | state |
 |---|---|---|
 | H.264 | libnvencvt (rating 1100, above the built-in `libnvdec_h264` at 1000) | bit-exact |
-| HEVC | built-in `libnvdec_hevc` (closed) | bit-exact; libnvencvt's HEVC stays off here (see "Open") |
+| HEVC 8/10-bit, 4:4:4 | libnvencvt (rating 1100, above the built-in closed `libnvdec_hevc`) | bit-exact, incl. 17 JCT-VC conformance streams |
 | VP9 8/10-bit | libnvencvt | bit-exact, incl. 4x4 tiles, error resilient, 4K |
 | AV1 8/10-bit | libnvencvt | bit-exact, incl. SVC, 4K 10-bit |
 
@@ -27,8 +27,11 @@ No public header lists the methods of class `0xcfb0` (`clcfb0.h` in open-gpu-ker
      Blackwell8Bit / Blackwell16Bit; Mesa NIL's names); without them it writes the Turing layout, intra pictures still
      come out right, and inter prediction (tiles, 10-bit) reads wrong samples.
      VP9: `reserved5` = kinds, `reserved1[2]` = format code. AV1: `reserved_stat` = kinds | code << 4.
-   - a word after the structure with the 0x4dc units: VP9 at `+0x108`, AV1 at `+0x244`.
-   - AV1: `reserved12` (`+0x54`) = `0xffff`.
+     HEVC: `reserved6` = kinds, `reserved7` = format code + chroma format (4:2:0 0, 4:4:4 2).
+   - a word after the structure with the 0x4dc units: VP9 at `+0x108`, AV1 at `+0x244`, HEVC at `+0x11c`.
+   - AV1: `reserved12` (`+0x54`) = `0xffff`; HEVC: `0xffff` at `+0x120`.
+   With these kinds HEVC also writes the Blackwell layouts by element size (the AROS driver, which fills the kinds
+   otherwise, reads HEVC in the 32-bit order; with ours that order is wrong on every picture).
 
 H.264 needs none of it: its pictures come out in the Blackwell layout with Ada's setup.
 
@@ -64,6 +67,28 @@ VideoToolbox then converted, 63 ms per 4K picture (16 fps). The picture is now n
 (`gob_untile_plane_narrow`, `(v + 0x80) >> 8` saturating), the client gets its own format and VideoToolbox converts
 nothing: 93 fps, identical to the software decode rounded the same way. `NVDEC_NONARROW=1` restores the old path.
 
+## Our HEVC decoder against NullMoth's closed one
+
+Both bit-exact on the same 23 streams (6 generated, 17 JCT-VC conformance). Throughput (`tools/blackwell-video/compare_hevc.sh`,
+5 runs each, fps):
+
+| path | stream | ours | closed |
+|---|---|---|---|
+| ffmpeg (IINA, mpv: OpenGL-compatible buffers) | 4K 8-bit | ~48 | ~15 |
+| ffmpeg | 1080p | ~127 | ~64 |
+| ffmpeg | 4K 10-bit | ~26 | ~27 |
+| AVFoundation | 4K 8-bit | ~120-130 | ~146 |
+| AVFoundation | 4K 10-bit (P010) | ~72 | ~73 |
+| AVFoundation | 4K 10-bit read as NV12 | ~80 | ~15 |
+| AVFoundation | 1080p | ~490 | ~455 |
+| AVFoundation | 4:4:4 640x360 | ~67 | ~68 |
+
+The closed decoder hands out buffers with fixed attributes, which VideoToolbox copies when the client asks for others
+(ffmpeg's OpenGL-compatible ones; 8-bit for 10-bit); ours makes them to the client's attributes. Its engine is faster per
+picture at 4K 8-bit (3.5 ms against ~6 ms; not explained: not the surfaces' memory, which in video memory made our CPU
+copy 100 ms, and not the buffers it sets that we do not). Neither failed in 20 AVFoundation runs (the closed one once in
+an earlier set of 10). Ours is rated above it on Blackwell.
+
 ## Performance (AVFoundation, RTX 5060 Ti)
 
 | stream | fps | per picture inside the decoder |
@@ -73,6 +98,7 @@ nothing: 93 fps, identical to the software decode rounded the same way. `NVDEC_N
 | AV1 4K 10-bit read as NV12 | ~93 | |
 | VP9 4K / 1080p | ~140-160 / ~700 | |
 | H.264 4K | ~100 | |
+| HEVC 4K 8-bit / 10-bit (P010) / 10-bit as NV12 | ~120-130 / ~72 / ~80 | engine ~6 ms, copy ~3.5-4 ms (8-bit) |
 
 The copy (untiling into the client's buffer on the CPU) is the other half of the time; the Blackwell layouts got a
 whole-tile path (5.2 -> 3.4 ms at 4K 8-bit).
@@ -90,9 +116,11 @@ whole-tile path (5.2 -> 3.4 ms at 4K 8-bit).
 
 ## Open
 
-- libnvencvt's own HEVC decoder lacks the setup fields above for HEVC (AROS: `reserved6` = kinds, `reserved7` =
-  3 x depth code + chroma format, `+0x11c` = units, `+0x120` = `0xffff`); its inter pictures fail on Blackwell, so HEVC
-  stays on the built-in decoder. `NVENCVT_BLACKWELL_ALL_DEC=1` registers it for that work.
+- Our HEVC engine time at 4K 8-bit (~6 ms against the closed decoder's 3.5 ms).
+- MPEG-1/2/4 decode on Blackwell: not tried (`NVENCVT_BLACKWELL_ALL_DEC=1` registers them).
 - The plugin's automatic libnvencvt choice could include Blackwell (`nvmtl_nvencvt_selected` in plugin/NVMTLDevice.m);
   that needs a plugin rebuild. Until then `NVMTL_NVENCVT=1` in nvrm610.conf.
 - AV1 / VP9 encode on Blackwell (no encoder setup for NVENC class `0xcfb7`).
+
+---
+Copyright (c) 2026 kevineduardo. Licensed under the MIT License (SPDX-License-Identifier: MIT).

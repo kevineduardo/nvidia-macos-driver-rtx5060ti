@@ -1,4 +1,6 @@
 #!/bin/bash
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 kevineduardo
 # trace_closed_push.sh <hevc.mp4>: runs ffmpeg under lldb with NullMoth's closed HEVC decoder registered (closed_hevc_shim)
 # and dumps the process's data regions at nvd265_close; then push_decode.py finds and prints the NVDEC method stream.
 # This is how method 0x4dc was found. FFMPEG must carry com.apple.security.get-task-allow (re-sign it with an entitlements

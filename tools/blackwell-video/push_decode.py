@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 kevineduardo
 """push_decode.py <dump dir> <clc9b0.h>: finds the region of a trace dump holding the most NVDEC EXECUTE headers and prints
 its method stream (INC / IMMD headers), naming the methods clc9b0.h names; a method without a name ("?") is one the public
 header leaves out (0x4dc on Blackwell)."""

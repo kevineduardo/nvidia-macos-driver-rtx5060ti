@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 kevineduardo
 """narrow_compare.py <ref.yuv420p10le> <hw.nv12> <WxH>: the hardware decoder's 8-bit NV12 against the 10-bit reference
 rounded to 8 bits ((v + 2) >> 2, at most 255). Every 7th luma sample and every chroma sample of every frame."""
 import sys, array

@@ -1,4 +1,6 @@
 #!/bin/bash
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 kevineduardo
 # psnr.sh <vector> [nv12|p010le]: per-frame luma PSNR of the hardware decode against the software one: min / average and
 # the frames under 99 dB. For telling a layout or setup error (garbage, ~10 dB) from a small one.
 source "$(dirname "$0")/env.sh"

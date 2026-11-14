@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2026 kevineduardo
 // avread.swift <file> <8|10> [raw-out]: AVAssetReader decode (NV12 or P010 asked for), fps, optional raw NV12 dump (8-bit)
 import AVFoundation
 import Metal

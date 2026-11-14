@@ -1,4 +1,6 @@
 #!/bin/bash
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 kevineduardo
 # unit_tests.sh: the plane copies, sample by sample, without a GPU: gob_untile_plane's whole-tile path for the Blackwell
 # layouts and gob_untile_plane_narrow (16-bit samples to 8-bit), against gob_offset and the scalar rounding, at sizes with
 # and without partial tiles (up to 8K)

@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 kevineduardo
 """trace_closed_push.py: an lldb script. At nvd265_close (NullMoth's closed HEVC decoder) it dumps every readable,
 non-executable data region of the process into $TRACE_OUT (lldb's own environment), so the push buffer the decoder wrote
 can be read back with push_decode.py. Used with trace_closed_push.lldb; see README.md."""

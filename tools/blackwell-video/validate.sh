@@ -1,4 +1,6 @@
 #!/bin/bash
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 kevineduardo
 # validate.sh: everything that checked Blackwell VP9 / AV1 decode, in order. Needs FFMPEG (see env.sh) and an RTX 50 card
 # for the GPU steps; the first two need neither.
 #   1 static checks of the source (tools/test_nvencvt_blackwell.py) and the parsers under the sanitizer harness

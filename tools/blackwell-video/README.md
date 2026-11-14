@@ -13,7 +13,8 @@ and why is in [docs/BLACKWELL-VIDEO-DECODE.md](../../docs/BLACKWELL-VIDEO-DECODE
 
 The library under test is **injected** (`DYLD_INSERT_LIBRARIES`), so nothing is installed to test it. In AVFoundation runs
 the installed copy is kept out of the process with `NVMTL_PROCESS_ENV=1 NVMTL_NVENCVT=0`; otherwise two decoders with the
-same rating are registered and VideoToolbox picks either. In zsh, put such variables on the command line itself: a `$VAR`
+same rating are registered and VideoToolbox picks either. The injected library registers itself only when its path
+contains "nvencvt" (`libx.dylib` loads and silently does nothing; VideoToolbox then uses another decoder). In zsh, put such variables on the command line itself: a `$VAR`
 holding several `A=B` words is not split.
 
 ## Running
@@ -31,11 +32,12 @@ or one step at a time:
 | `unit_tests.sh` | the Blackwell plane copies and the 16->8-bit narrowing, sample by sample, sizes up to 8K (no GPU) | every line `ok` |
 | `build_local.sh [out]` | builds libnvencvt as `build/build_nvencvt.sh` does (exports, minos 15.0) on this Mac | `warnings: 0` |
 | `fetch_vectors.sh` | downloads the libvpx / AV1 conformance vectors, generates the other streams | |
-| `matrix.sh` | `cmp.sh` on every vector: framemd5 of the hardware decode vs FFmpeg's software decode | `ALL BIT-EXACT` |
+| `matrix.sh` | `cmp.sh` on every vector: framemd5 of the hardware decode vs FFmpeg's software decode, then HEVC (generated and 17 JCT-VC conformance streams) | `ALL BIT-EXACT`, `HEVC ALL BIT-EXACT` |
 | `cmp.sh <vector> [p010le]` | one vector; the hardware run's log is `$WORK/out/<vector>.log` | `mismatched=0` |
 | `psnr.sh <vector>` | per-frame PSNR, to tell garbage (a layout or setup error, ~10 dB) from a near miss | |
-| `stress.sh` | AVAssetReader (asynchronous) x15 per stream: AV1 4K 8/10-bit, VP9 1080p, H.264 4K | `fail=0 late=0` |
+| `stress.sh` | AVAssetReader (asynchronous) x15 per stream: AV1 4K 8/10-bit, VP9 1080p, H.264 4K, HEVC 4K 8/10-bit | `fail=0 late=0` |
 | `narrow_check.sh` | 10-bit read as 8-bit NV12 vs the software decode rounded the same way | `differing samples 0` |
+| `compare_hevc.sh [runs]` | our HEVC decoder against NullMoth's closed one, same streams, ffmpeg and AVFoundation | see the doc's table |
 | `swift vt_hw_check.swift` | what VideoToolbox reports as hardware in a process with a Metal device (the installed driver) | all `true` |
 | `trace_closed_push.sh <hevc.mp4>` | dumps and decodes the NVDEC methods NullMoth's closed HEVC decoder sends (how 0x4dc was found) | |
 | `macho_segcmp.py a b label` | the same code apart from the signature (re-signed vs rebuilt) | |
@@ -46,3 +48,6 @@ narrowing 0 differing samples. AVFoundation throughput: AV1 4K 8-bit 138-148 fps
 
 Expected exceptions (not Blackwell-specific; mickys/nvenc docs/tasks.md T9.03 / T9.04): AV1 under 128x128 is refused
 (software decode instead); `av1-1-b8-03-sizeup` through ffmpeg differs after the size change (ffmpeg keeps its session).
+
+---
+Copyright (c) 2026 kevineduardo. Licensed under the MIT License (SPDX-License-Identifier: MIT).

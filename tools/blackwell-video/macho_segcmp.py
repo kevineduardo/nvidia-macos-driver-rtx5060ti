@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 kevineduardo
 """macho_segcmp.py <a> <b> <label>: whether two Mach-O files have the same segments apart from __LINKEDIT (the code
 signature), i.e. the same code with different signatures: tells a re-signed binary from a rebuilt one."""
 import sys, struct, hashlib

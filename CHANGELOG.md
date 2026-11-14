@@ -5,7 +5,8 @@
 ### Video on RTX 50 (Blackwell)
 - Hardware VP9 and AV1 decode (8- and 10-bit) through libnvencvt, bit-exact against software decodes on an RTX 5060 Ti. Blackwell needs one more NVDEC method (0x4dc) and picture-setup fields Ada's headers do not have; see docs/BLACKWELL-VIDEO-DECODE.md. Turn it on with `NVMTL_NVENCVT=1` in `/Library/GPUBundles/nvmtl/nvrm610.conf`.
 - Decoding no longer stops after about 200 pictures (the push buffer was never reused on Blackwell) and no longer loses a picture now and then under AVFoundation (GPPut is read back before the doorbell).
-- A 10-bit VP9 / AV1 stream read as 8-bit is converted while it is copied out: 4K AV1 16 -> 93 fps.
+- A 10-bit VP9 / AV1 / HEVC stream read as 8-bit is converted while it is copied out: 4K AV1 16 -> 93 fps.
+- HEVC through libnvencvt on Blackwell too, above NullMoth's closed decoder: bit-exact on the JCT-VC conformance streams, 2-3x faster through ffmpeg-based players and 5x for 8-bit clients of 10-bit streams.
 - Test bench: tools/blackwell-video (`validate.sh`).
 
 ## 3.0

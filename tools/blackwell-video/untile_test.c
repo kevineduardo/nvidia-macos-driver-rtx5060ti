@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2026 kevineduardo
 // untile_test.c: gob_untile_plane (whole-tile fast path) against gob_offset, sample by sample, both Blackwell layouts
 // untile_test.c: gob_untile_plane (fast path) against gob_offset, sample by sample, for both Blackwell layouts
 #include <stdio.h>

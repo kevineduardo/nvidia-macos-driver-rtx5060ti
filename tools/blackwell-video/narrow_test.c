@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2026 kevineduardo
 // narrow_test.c: gob_untile_plane_narrow (16-bit samples untiled and rounded to 8 bits) against the scalar rule
 #include <stdio.h>
 #include <stdlib.h>

@@ -180,21 +180,21 @@ if kind and have_cc:
               got == ['4', '4', '4', '1', '3', '2', '5', '5', '5', '0', '0'], ' '.join(got))
 dec = (V / 'vt/nvencvt_dec.c').read_text()
 reg = function(dec, 'OSStatus NVDecVT_Register(')
-check('Blackwell registers H.264, VP9 and AV1; HEVC and MPEG only when NVENCVT_BLACKWELL_ALL_DEC asks',
-      reg is not None and 'h264Only = gNvencvtGpu == 4 && !getenv("NVENCVT_BLACKWELL_ALL_DEC")' in reg
-      and reg.count('!h264Only') == 2 and 'if (!getenv("NVENCVT_NO_VP9DEC")) {' in reg
-      and 'nvcls == 0xcfb0' in reg)
+check('Blackwell registers H.264, HEVC, VP9 and AV1; MPEG only when NVENCVT_BLACKWELL_ALL_DEC asks',
+      reg is not None and 'mpegOff = gNvencvtGpu == 4 && !getenv("NVENCVT_BLACKWELL_ALL_DEC")' in reg
+      and 'h264Only' not in reg and reg.count('!mpegOff') == 1 and 'if (!getenv("NVENCVT_NO_VP9DEC")) {' in reg
+      and 'if (NV_HEVC_HDR && !av1Vp9Only && !getenv("NVENCVT_NO_HEVCDEC")) {' in reg and 'nvcls == 0xcfb0' in reg)
 # VP9 and AV1 inter pictures on Blackwell: method 0x4dc and the picture setup's Blackwell fields (nvdec_blackwell.h)
 bw = (V / 'src/nvdec_blackwell.h').read_text()
 check('the Blackwell method and setup values are the traced ones',
       '#define NVCFB0_SET_INTER_SCRATCH_OFFSET 0x000004dc' in bw and 'NVCFB0_BLK_UNITS(w) ((((unsigned)(w) + 127) / 128) + 1)' in bw
       and 'NVCFB0_PLANE_KINDS(bps) ((bps) == 2 ? 2u : 9u)' in bw)
-for name, units in (('vp9dec.c', '+ 0x108)'), ('av1dec.c', '+ 0x244)')):
+for name, units in (('vp9dec.c', '+ 0x108)'), ('av1dec.c', '+ 0x244)'), ('hevcdec.c', '+ 0x11c)')):
     src = (V / 'src' / name).read_text()
     check(f'{name}: 0x4dc sent on Blackwell, the units word written, planes read in the card\'s layout',
           'NVCFB0_SET_INTER_SCRATCH_OFFSET' in src and units in src and 'NVCFB0_PLANE_KINDS(d->bps)' in src
           and 'nvenc_in_untile_plane' not in src and 'nvenc_in_offset' not in src
-          and 'gob_layout_for(rm_class(rm, RM_CLS_NVDEC)' in src)
+          and ('gob_layout_for(rm_class(rm, RM_CLS_NVDEC)' in src or 'd->gobY = gob_layout_for(cls, ey)' in src))
     check(f'{name}: the push buffer is reused after a completion the decoder saw (Blackwell reports no GPGet)',
           'chan_done(c);' in src)
 regenc = function(vt, '__attribute__((visibility("default"))) OSStatus NVEncVT_Register(')
@@ -205,10 +205,10 @@ sub = function(chan, 'NV_STATUS chan_submit(')
 check('GPPut is read back before the doorbell (a lost submission otherwise, now and then)',
       sub is not None and sub.index('(void)((volatile AmpereAControlGPFifo *)c->userd.cpu)->GPPut;') < sub.index('*c->doorbell = c->token;'))
 check('the decoders on Blackwell wait through chan_wait (the doorbell rung again for a late picture)',
-      all('chan_wait(c, sv, val, 1000);' in (V / 'src' / f).read_text() for f in ('dec.c', 'vp9dec.c', 'av1dec.c')))
+      all('chan_wait(c, sv, val, 1000);' in (V / 'src' / f).read_text() for f in ('dec.c', 'vp9dec.c', 'av1dec.c', 'hevcdec.c')))
 dvt = (V / 'vt/nvencvt_dec.c').read_text()
 check('a 10-bit VP9 / AV1 stream for an 8-bit client is narrowed while untiled',
-      'narrowed while untiled' in dvt and 'vp9dec_read_nv12_8bit' in dvt and 'av1dec_read_nv12_8bit' in dvt)
+      'narrowed while untiled' in dvt and 'vp9dec_read_nv12_8bit' in dvt and 'av1dec_read_nv12_8bit' in dvt and 'hevcdec_read_nv12_8bit' in dvt)
 h264 = (V / 'src/dec.c').read_text()
 check('the H.264 decoder reads its planes in the card\'s layout, cropped pictures included',
       'nvenc_in_untile_plane' not in h264 and 'nvenc_in_offset' not in h264 and h264.count('gob_offset(d->gob') == 4)

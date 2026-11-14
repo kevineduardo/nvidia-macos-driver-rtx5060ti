@@ -9,6 +9,7 @@
 #include "class/clc56f.h"
 #include "class/cl2080_notification.h"
 #include "clc9b0.h"
+#include "nvdec_blackwell.h"
 #include "nvdec_drv.h"
 
 static NvU32 hi(NvU64 a) { return (NvU32)(a >> 8); }
@@ -30,6 +31,14 @@ int hevcdec_open(HevcDec *d, Rm *rm, unsigned maxW, unsigned maxH, int bit_depth
     d->first_pic = true; d->after_eos = true;
     NV_NVDEC_ALLOCATION_PARAMETERS dp = { .size = sizeof dp, .prohibitMultipleInstances = 0, .engineInstance = 0 };
     d->turing = rm_class(rm, RM_CLS_NVDEC) == 0xc4b0;
+    {   // Decoded planes: on Blackwell in its own layouts, by element size, which the picture setup's plane kinds name
+        // (nvdec_blackwell.h; measured bit-exact on an RTX 5060 Ti; the AROS driver, which fills the kinds otherwise, saw
+        // the 32-bit order). NVDEC_GOB overrides; HEVCDEC_GOB_ELEM=1|2|4 names another luma element size (tests).
+        const unsigned cls = rm_class(rm, RM_CLS_NVDEC);
+        const char *e = getenv("HEVCDEC_GOB_ELEM");
+        const unsigned ey = e ? (unsigned)atoi(e) : (unsigned)d->bps;
+        d->gobY = gob_layout_for(cls, ey); d->gobC = gob_layout_for(cls, 2 * ey);
+    }
     if (chan_create(rm, &d->chan, NV2080_ENGINE_TYPE_NVDEC0, rm_class(rm, RM_CLS_NVDEC), &dp)) { fprintf(stderr, "hevcdec: channel failed\n"); return -1; }
     const size_t b16 = (size_t)(d->maxW / 16) * (d->maxH / 16);
     // co-located MVs: 128 bytes per 16x16 block per picture (generous; the headers give no size)
@@ -69,6 +78,10 @@ int hevcdec_open(HevcDec *d, Rm *rm, unsigned maxW, unsigned maxH, int bit_depth
     for (int i = 0; i < HEVC_SURFACES; i++)
         if (rm_mem_alloc(rm, &d->luma[i], (luma + 0xfff) & ~(size_t)0xfff, 0x1000, true, true, true) ||
             rm_mem_alloc(rm, &d->chroma[i], (chroma + 0xfff) & ~(size_t)0xfff, 0x1000, true, true, true)) { fprintf(stderr, "hevcdec: surface alloc failed\n"); return -1; }
+    if (rm_class(rm, RM_CLS_NVDEC) == NVDEC_CLASS_BLACKWELL) {
+        if (rm_mem_alloc(rm, &d->inter_scratch, NVCFB0_INTER_SCRATCH_SIZE(d->maxW, d->maxH), 0x1000, true, true, true)) { fprintf(stderr, "hevcdec: alloc failed\n"); return -1; }
+        memset(d->inter_scratch.cpu, 0, d->inter_scratch.size);
+    }
     chan_mthd(&d->chan, 0, NVC56F_SET_OBJECT, 1, rm_class(rm, RM_CLS_NVDEC));
     return 0;
 }
@@ -79,15 +92,16 @@ void hevcdec_close(HevcDec *d)
     RmMem *m[] = { &d->setup, &d->bs, &d->scaling, &d->tiles, &d->filter, &d->coloc, &d->intra, &d->slinfo, &d->status, &d->sem };
     for (size_t i = 0; i < sizeof m / sizeof m[0]; i++) rm_mem_free(d->rm, m[i]);
     for (int i = 0; i < HEVC_SURFACES; i++) { rm_mem_free(d->rm, &d->luma[i]); rm_mem_free(d->rm, &d->chroma[i]); }
+    if (d->inter_scratch.size) rm_mem_free(d->rm, &d->inter_scratch);
     free(d->au); d->au = NULL;
 }
 
 void hevcdec_release(HevcDec *d, int surf) { if (surf >= 0 && surf < HEVC_SURFACES) d->busy[surf] = false; }
 
-static unsigned sample(const uint8_t *p, size_t x, size_t y, size_t pitch, int bps, int shift)
+static unsigned sample(const uint8_t *p, int gob, size_t x, size_t y, size_t pitch, int bps, int shift)
 {
-    if (bps == 1) return p[nvenc_in_offset(x, y, pitch)];
-    const size_t o = nvenc_in_offset(2 * x, y, pitch);
+    if (bps == 1) return p[gob_offset(gob, x, y, pitch)];
+    const size_t o = gob_offset(gob, 2 * x, y, pitch);
     return (unsigned)(p[o] | p[o + 1] << 8) >> shift;
 }
 
@@ -96,16 +110,33 @@ void hevcdec_read_nv12(HevcDec *d, int surf, uint8_t *y, size_t ystride, uint8_t
     const size_t b = (size_t)d->bps, cp = d->chroma_format == 3 ? 2 * d->pitch : d->pitch;
     const unsigned cw = d->chroma_format == 3 ? w : (w + 1) / 2, ch = d->chroma_format == 3 ? h : (h + 1) / 2;
     if (!x0 && !y0) {
-        nvenc_in_untile_plane(y, ystride, d->luma[surf].cpu, w * b, h, d->pitch);
-        nvenc_in_untile_plane(uv, uvstride, d->chroma[surf].cpu, 2 * cw * b, ch, cp);
+        gob_untile_plane(d->gobY, y, ystride, d->luma[surf].cpu, w * b, h, d->pitch);
+        gob_untile_plane(d->gobC, uv, uvstride, d->chroma[surf].cpu, 2 * cw * b, ch, cp);
         return;
     }
     // a conformance window that crops the left / top: sample by sample (rare)
     const unsigned cx0 = d->chroma_format == 3 ? x0 : x0 / 2, cy0 = d->chroma_format == 3 ? y0 : y0 / 2;
     for (unsigned r = 0; r < h; r++) for (unsigned x = 0; x < w; x++) for (size_t k = 0; k < b; k++)
-        y[r * ystride + x * b + k] = ((const uint8_t *)d->luma[surf].cpu)[nvenc_in_offset((x0 + x) * b + k, y0 + r, d->pitch)];
+        y[r * ystride + x * b + k] = ((const uint8_t *)d->luma[surf].cpu)[gob_offset(d->gobY, (x0 + x) * b + k, y0 + r, d->pitch)];
     for (unsigned r = 0; r < ch; r++) for (unsigned x = 0; x < 2 * cw; x++) for (size_t k = 0; k < b; k++)
-        uv[r * uvstride + x * b + k] = ((const uint8_t *)d->chroma[surf].cpu)[nvenc_in_offset((2 * cx0 + x) * b + k, cy0 + r, cp)];
+        uv[r * uvstride + x * b + k] = ((const uint8_t *)d->chroma[surf].cpu)[gob_offset(d->gobC, (2 * cx0 + x) * b + k, cy0 + r, cp)];
+}
+
+void hevcdec_read_nv12_8bit(HevcDec *d, int surf, uint8_t *y, size_t ystride, uint8_t *uv, size_t uvstride, unsigned w, unsigned h, unsigned x0, unsigned y0)
+{
+    if (d->bps != 2 || d->chroma_format != 1) { hevcdec_read_nv12(d, surf, y, ystride, uv, uvstride, w, h, x0, y0); return; }
+    const unsigned cw = (w + 1) / 2, ch = (h + 1) / 2;
+    if (!x0 && !y0) {
+        gob_untile_plane_narrow(d->gobY, y, ystride, d->luma[surf].cpu, (size_t)w * 2, h, d->pitch);
+        gob_untile_plane_narrow(d->gobC, uv, uvstride, d->chroma[surf].cpu, (size_t)cw * 4, ch, d->pitch);
+        return;
+    }
+    // cropped on the left / top (rare): sample by sample, rounded as gob_untile_plane_narrow rounds
+    #define N8(p, o) ((uint8_t)(((unsigned)((p)[o] | (p)[(o) + 1] << 8) + 0x80) > 0xffff ? 0xff : ((unsigned)((p)[o] | (p)[(o) + 1] << 8) + 0x80) >> 8))
+    const uint8_t *L = d->luma[surf].cpu, *C = d->chroma[surf].cpu;
+    for (unsigned r = 0; r < h; r++) for (unsigned x = 0; x < w; x++) y[r * ystride + x] = N8(L, gob_offset(d->gobY, 2 * (x0 + x), y0 + r, d->pitch));
+    for (unsigned r = 0; r < ch; r++) for (unsigned x = 0; x < 2 * cw; x++) uv[r * uvstride + x] = N8(C, gob_offset(d->gobC, 2 * (x0 / 2 * 2 + x), y0 / 2 + r, d->pitch));
+    #undef N8
 }
 
 void hevcdec_read_yuv(HevcDec *d, int surf, uint8_t *dst, const int crop[4], unsigned w, unsigned h)
@@ -115,12 +146,12 @@ void hevcdec_read_yuv(HevcDec *d, int surf, uint8_t *dst, const int crop[4], uns
     const unsigned cw = (w + (unsigned)sx) >> sx, ch = (h + (unsigned)sy) >> sy, x0 = (unsigned)crop[0], y0 = (unsigned)crop[2];
     const int b = d->bps, sh = b == 2 ? 16 - d->bit_depth : 0;   // 10/12-bit samples MSB-aligned (like P010)
     #define PUT(i, v) do { if (b == 1) dst[i] = (uint8_t)(v); else { dst[2 * (i)] = (uint8_t)(v); dst[2 * (i) + 1] = (uint8_t)((v) >> 8); } } while (0)
-    for (unsigned y = 0; y < h; y++) for (unsigned x = 0; x < w; x++) PUT((size_t)y * w + x, sample(L, x0 + x, y0 + y, d->pitch, b, sh));
+    for (unsigned y = 0; y < h; y++) for (unsigned x = 0; x < w; x++) PUT((size_t)y * w + x, sample(L, d->gobY, x0 + x, y0 + y, d->pitch, b, sh));
     const size_t uo = (size_t)w * h, vo = uo + (size_t)cw * ch;
     for (unsigned y = 0; y < ch; y++) for (unsigned x = 0; x < cw; x++) {
         const size_t cx = (x0 >> sx) + x, cy = (y0 >> sy) + y;
-        PUT(uo + (size_t)y * cw + x, sample(C, 2 * cx, cy, d->pitch * (d->chroma_format == 3 ? 2 : 1), b, sh));
-        PUT(vo + (size_t)y * cw + x, sample(C, 2 * cx + 1, cy, d->pitch * (d->chroma_format == 3 ? 2 : 1), b, sh));
+        PUT(uo + (size_t)y * cw + x, sample(C, d->gobC, 2 * cx, cy, d->pitch * (d->chroma_format == 3 ? 2 : 1), b, sh));
+        PUT(vo + (size_t)y * cw + x, sample(C, d->gobC, 2 * cx + 1, cy, d->pitch * (d->chroma_format == 3 ? 2 : 1), b, sh));
     }
     #undef PUT
 }
@@ -323,6 +354,15 @@ static int decode_pending(HevcDec *d)
     for (int i = 0; i < 6; i++) { x->cb_qp_adjustment[i] = (char)pps->cb_qp_offset_list[i]; x->cr_qp_adjustment[i] = (char)pps->cr_qp_offset_list[i]; }
     x->HevcFltAboveOffset = (unsigned)(d->flt_above >> 8); x->HevcSaoAboveOffset = (unsigned)(d->flt_sao_above >> 8);
     ps->v3.HevcSliceEdgeOffset = (unsigned)(d->flt_edge >> 8);
+    if (d->inter_scratch.size) {
+        // Blackwell's additions (nvdec_blackwell.h; HEVC's places, as NVIDIA's driver fills them for CFB0 by the AROS nvgfx
+        // driver): the planes' kinds in reserved6, the surface format code plus the chroma format (4:2:0 0, 4:4:4 2) in
+        // reserved7, and after the structure the 0x4dc units word (+0x11c) and 0xffff (+0x120)
+        ps->reserved6 = (unsigned char)NVCFB0_PLANE_KINDS(d->bps);
+        ps->reserved7 = (unsigned short)(NVCFB0_SURFACE_FORMAT(sps->bit_depth_luma) + (unsigned)(sps->chroma_format_idc - 1));
+        *(NvU32 *)((uint8_t *)d->setup.cpu + 0x11c) = NVCFB0_BLK_UNITS(sps->width);
+        *(uint16_t *)((uint8_t *)d->setup.cpu + 0x120) = 0xffff;
+    }
     // tile sizes in CTBs, per tile in raster order: width, height (2 bytes each, GIP_ASIC_TILE_SIZE)
     int cols[21], rows[23]; hevc_tiles(sps, pps, cols, rows);
     uint16_t *ts = d->tiles.cpu; memset(ts, 0, GIP_ASIC_TILE_SIZE);
@@ -343,6 +383,7 @@ static int decode_pending(HevcDec *d)
     // not on Turing (0xc4b0): its class has no such method and NVIDIA's driver sends none there (VP9: given one, that engine
     // misused the buffer; docs/traces/vp9dec-gtx1650-linux); HEVC never touched it on Turing anyway
     if (!d->turing) chan_mthd(c, 0, NVC9B0_SET_INTRA_TOP_BUF_OFFSET, 1, hi(d->intra.gpu));
+    if (d->inter_scratch.size) chan_mthd(c, 0, NVCFB0_SET_INTER_SCRATCH_OFFSET, 1, hi(d->inter_scratch.gpu));   // Blackwell
     chan_mthd(c, 0, NVC9B0_HEVC_SET_SCALING_LIST_OFFSET, 1, hi(d->scaling.gpu));
     chan_mthd(c, 0, NVC9B0_HEVC_SET_TILE_SIZES_OFFSET, 1, hi(d->tiles.gpu));
     chan_mthd(c, 0, NVC9B0_HEVC_SET_FILTER_BUFFER_OFFSET, 1, hi(d->filter.gpu));
@@ -360,10 +401,16 @@ static int decode_pending(HevcDec *d)
     const double t0 = now_ms();
     memset(d->status.cpu, 0, sizeof(nvdec_status_s));
     chan_submit(c);
-    while (sv[0] != val && now_ms() - t0 < 1000) { }
+    chan_wait(c, sv, val, 1000);
     d->engine_ms = now_ms() - t0;
     d->auN = 0;
-    if (sv[0] != val) { fprintf(stderr, "hevcdec: no completion (error notifier 0x%x)\n", chan_error(c)); return -1; }
+    if (sv[0] != val) {
+        NvU64 fa = 0; NvU32 ft = 0; char fs[32] = "";
+        fprintf(stderr, "hevcdec: no completion (error notifier 0x%x)\n", chan_error(c));
+        if (chan_error(c) && !chan_fault(c, &fa, &ft, fs) && fa) fprintf(stderr, "hevcdec: MMU fault at 0x%llx type %u %s\n", (unsigned long long)fa, ft, fs);
+        return -1;
+    }
+    chan_done(c);   // the push buffer may wrap (Blackwell reports no GPGet; see channel.c)
     const nvdec_status_s *st = d->status.cpu;
     d->err_status = st->error_status; d->ok_blocks = st->hevc.frame_status_intra_cnt + st->hevc.frame_status_inter_cnt;
     if (d->verbose)

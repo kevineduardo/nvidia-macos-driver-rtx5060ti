@@ -15,6 +15,8 @@ typedef struct {
     unsigned maxW, maxH;            // allocation size (pixels, multiple of 64)
     int bit_depth, bps, chroma_format;
     size_t pitch;                   // bytes
+    int gobY, gobC;                 // how the bytes of a decoded luma / chroma plane lie (blocklinear.h)
+    RmMem inter_scratch;            // Blackwell only (nvdec_blackwell.h); size 0 elsewhere
     RmMem setup, bs, scaling, tiles, filter, coloc, intra, slinfo, status, sem;
     size_t colmv_size, flt_sao, flt_bsd, flt_above, flt_sao_above, flt_edge;
     RmMem luma[HEVC_SURFACES], chroma[HEVC_SURFACES];
@@ -50,3 +52,5 @@ void hevcdec_release(HevcDec *d, int surf);
 // 4:4:4 like NV24) w x h from (x0, y0) (the conformance window's left / top crop).
 void hevcdec_read_yuv(HevcDec *d, int surf, uint8_t *dst, const int crop[4], unsigned w, unsigned h);
 void hevcdec_read_nv12(HevcDec *d, int surf, uint8_t *y, size_t ystride, uint8_t *uv, size_t uvstride, unsigned w, unsigned h, unsigned x0, unsigned y0);
+// a 10/12-bit 4:2:0 picture as 8-bit NV12 (rounded), for a client that asked for 8 bits
+void hevcdec_read_nv12_8bit(HevcDec *d, int surf, uint8_t *y, size_t ystride, uint8_t *uv, size_t uvstride, unsigned w, unsigned h, unsigned x0, unsigned y0);

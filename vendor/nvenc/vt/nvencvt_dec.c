@@ -465,7 +465,7 @@ static OSStatus set_output(DState *s, VTVideoDecoderSession session, CMVideoForm
     // A 10-bit VP9 / AV1 stream for a client that asked for the same range in 8 bits (AVAssetReader, transcoders): the
     // picture is narrowed while it is untiled (read_nv12_8bit), so the output format is the client's and VideoToolbox
     // has nothing to convert (it took 63 ms per 4K picture). NVDEC_NONARROW=1 leaves the conversion to VideoToolbox.
-    if ((s->codec == CODEC_VP9 || s->codec == CODEC_AV1) && !getenv("NVDEC_NONARROW") &&
+    if ((s->codec == CODEC_VP9 || s->codec == CODEC_AV1 || s->codec == kCMVideoCodecType_HEVC) && !getenv("NVDEC_NONARROW") &&
         (pf == kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange || pf == kCVPixelFormatType_420YpCbCr10BiPlanarFullRange)) {
         CFDictionaryRef dst = VTDecoderSessionGetDestinationPixelBufferAttributes(session);
         CFNumberRef dpf = dst ? CFDictionaryGetValue(dst, kCVPixelBufferPixelFormatTypeKey) : NULL; OSType want = 0;
@@ -589,7 +589,7 @@ static void out_copy(DState *s, OutJob *j)
     const bool eight = bpf == kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange || bpf == kCVPixelFormatType_420YpCbCr8BiPlanarFullRange;
     if (s->codec == CODEC_VP9) (eight ? vp9dec_read_nv12_8bit : vp9dec_read_nv12)(s->vp9, j->surf, y, ys, uv, uvs, j->w, j->h);
     else if (s->codec == CODEC_AV1) (eight ? av1dec_read_nv12_8bit : av1dec_read_nv12)(s->av1, j->surf, y, ys, uv, uvs, j->w, j->h);
-    else if (s->codec == kCMVideoCodecType_HEVC) hevcdec_read_nv12(s->hevc, j->surf, y, ys, uv, uvs, j->w, j->h, j->cx, j->cy);
+    else if (s->codec == kCMVideoCodecType_HEVC) (eight ? hevcdec_read_nv12_8bit : hevcdec_read_nv12)(s->hevc, j->surf, y, ys, uv, uvs, j->w, j->h, j->cx, j->cy);
     else if (is_mpeg12(s->codec)) mpeg2dec_read_nv12(s->m2, j->surf, y, ys, uv, uvs, j->w, j->h);
     else if (s->codec == kCMVideoCodecType_MPEG4Video) mpeg4dec_read_nv12(s->m4, j->surf, y, ys, uv, uvs, j->w, j->h);
     else h264dec_read_nv12(&s->dec, j->surf, y, ys, uv, uvs, j->w, j->h);
@@ -990,12 +990,12 @@ OSStatus NVDecVT_Register(int rating)
     extern int gNvencvtGpu;   // vt/nvencvt.c: 1 Ada, 2 TU117 (GTX 1650: NVDEC 0xc4b0 has no AV1), 3 GA10x (RTX 30)
     const bool ampere = gNvencvtGpu == 3;
     const bool av1Vp9Only = ampere && !getenv("NVENCVT_AMPERE_ALL_DEC");
-    // Blackwell (4): H.264, VP9 and AV1, each bit-exact against software decodes on an RTX 5060 Ti (8- and 10-bit, inter
-    // frames, tiles, 4K). Ada's methods (clc9b0.h) are the ones used, plus what Blackwell adds for VP9 and AV1
-    // (src/nvdec_blackwell.h: method 0x4dc and the picture setup's plane kinds). HEVC and MPEG stay on NullMoth's own
-    // decoders there: our HEVC decoder lacks those additions (its inter frames fail); NVENCVT_BLACKWELL_ALL_DEC=1
-    // registers them anyway, for that work.
-    const bool h264Only = gNvencvtGpu == 4 && !getenv("NVENCVT_BLACKWELL_ALL_DEC");
+    // Blackwell (4): H.264, HEVC, VP9 and AV1, each bit-exact against software decodes on an RTX 5060 Ti (8- and 10-bit,
+    // inter frames, tiles, 4K; HEVC also the JCT-VC conformance streams). Ada's methods (clc9b0.h) are the ones used, plus
+    // what Blackwell adds (src/nvdec_blackwell.h: method 0x4dc and the picture setup's plane kinds). HEVC is rated above
+    // NullMoth's own decoder there too (docs/BLACKWELL-VIDEO-DECODE.md compares them). MPEG-1/2/4 stay off: not tried on
+    // Blackwell; NVENCVT_BLACKWELL_ALL_DEC=1 registers them anyway.
+    const bool mpegOff = gNvencvtGpu == 4 && !getenv("NVENCVT_BLACKWELL_ALL_DEC");
     typedef OSStatus (*RegFn)(FourCharCode, CFDictionaryRef, void *);
     RegFn reg = (RegFn)dlsym(RTLD_DEFAULT, "VTRegisterVideoDecoderWithInfo");
     if (!reg) { DLOG("VTRegisterVideoDecoderWithInfo not found"); return kVTCouldNotFindVideoDecoderErr; }
@@ -1009,7 +1009,7 @@ OSStatus NVDecVT_Register(int rating)
     if (!av1Vp9Only && !getenv("NVENCVT_NO_HEV1")) { OSStatus s3 = reg(CODEC_AVC3, info, (void *)NVDecVT_CreateInstance); DLOG("registered %s for avc3 -> %d", DECODER_ID, (int)s3); }
     CFRelease(info);
     DLOG("registered %s -> %d (rating %d)", DECODER_ID, (int)st, rating);
-    if (NV_HEVC_HDR && !av1Vp9Only && !h264Only && !getenv("NVENCVT_NO_HEVCDEC")) {   // HEVC (NVENCVT_NO_HEVCDEC=1 leaves it out): above NullMoth's own HEVC decoder too
+    if (NV_HEVC_HDR && !av1Vp9Only && !getenv("NVENCVT_NO_HEVCDEC")) {   // HEVC (NVENCVT_NO_HEVCDEC=1 leaves it out): above NullMoth's own HEVC decoder too
         const void *vh[] = { CFSTR(DECODER_ID_HEVC), CFSTR("NVDEC - HEVC - mickys/nvenc"), nr, kCFBooleanTrue };
         CFDictionaryRef ih = CFDictionaryCreate(NULL, k, vh, 4, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
         OSStatus sh = reg(kCMVideoCodecType_HEVC, ih, (void *)NVDecVT_CreateInstance);
@@ -1047,7 +1047,7 @@ OSStatus NVDecVT_Register(int rating)
         SuppFn supp = (SuppFn)dlsym(RTLD_DEFAULT, "VTRegisterSupplementalVideoDecoderIfAvailable");
         if (supp && !getenv("NVENCVT_NO_VP9SUPP")) { supp(CODEC_AV1); DLOG("opted in to AV1 decoding for this process"); }
     }
-    if (!av1Vp9Only && !h264Only && !getenv("NVENCVT_NO_MPEG2DEC")) {   // MPEG-1 / MPEG-2 and MPEG-4 Part 2 (M14): above Apple's software decoders
+    if (!av1Vp9Only && !mpegOff && !getenv("NVENCVT_NO_MPEG2DEC")) {   // MPEG-1 / MPEG-2 and MPEG-4 Part 2 (M14): above Apple's software decoders
         const struct { FourCharCode c; const char *id, *name; } m[] = {
             { kCMVideoCodecType_MPEG2Video, DECODER_ID_MPEG2, "NVDEC - MPEG-2 - mickys/nvenc" },
             { kCMVideoCodecType_MPEG1Video, DECODER_ID_MPEG1, "NVDEC - MPEG-1 - mickys/nvenc" },

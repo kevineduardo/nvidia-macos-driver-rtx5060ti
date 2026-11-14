@@ -1,4 +1,6 @@
 #!/bin/bash
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 kevineduardo
 # build_local.sh [out.dylib]: libnvencvt.dylib from vendor/nvenc on THIS Mac, with the same flags and checks as
 # build/build_nvencvt.sh (which builds on the build host). The pinned headers are fetched once into $WORK/hdr.
 # NVENC_DEBUG=1 adds -g. The result is not installed; see README.md for installing it.
