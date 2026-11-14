@@ -265,5 +265,16 @@ check('a submission after an overflow fails instead of sending a cut picture',
 check('the push buffer is reused after a completion the decoder saw, not only by the GPGet word',
       '!c->settled && chan_gpget(c) != c->gpPut' in ch and 'chan_done(c);' in h264)
 
+# two sessions decode on two threads of one process (a screen saver on two monitors, two videos in a browser): state a
+# function keeps between calls must be per thread. A shared bit reader made one in three such HEVC starts fail (software
+# decoding instead) and slice headers misparse.
+import re as _re, pathlib as _pl
+_shared = []
+for _f in sorted((_pl.Path(__file__).resolve().parent.parent / 'vendor/nvenc/src').glob('*.c')):
+    for _n, _l in enumerate(_f.read_text().splitlines(), 1):
+        if _re.match(r'\s+static\s+(?!const\b|_Thread_local\b|dispatch_once_t\b|pthread_once_t\b|_Atomic\b|int (env|avx2)\b)[^()]*;', _l):
+            _shared.append(f'{_f.name}:{_n}')
+check('no function keeps state shared between threads (static without _Thread_local)', not _shared, ' '.join(_shared))
+
 print(f'{fails} failed' if fails else 'all passed')
 sys.exit(1 if fails else 0)

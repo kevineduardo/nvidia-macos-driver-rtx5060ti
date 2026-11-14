@@ -153,7 +153,7 @@ int vp8dec_frame(Vp8Dec *d, const uint8_t *buf, size_t len)
 
     const size_t off = h->key ? 10 : 3;                         // the engine reads from the first partition on
     memcpy(d->bs.cpu, buf + off, len - off);
-    static uint8_t before[0x5000]; memcpy(before, d->prob.cpu, sizeof before);
+    static _Thread_local uint8_t before[0x5000]; memcpy(before, d->prob.cpu, sizeof before);
     nvdec_vp8_pic_s *ps = d->setup.cpu; memset(ps, 0, sizeof *ps);
     ps->FrameWidth = (unsigned short)((d->width + 15) & ~15); ps->FrameHeight = (unsigned short)((d->height + 15) & ~15);
     ps->keyFrame = (unsigned char)h->key; ps->version = (unsigned char)h->version;

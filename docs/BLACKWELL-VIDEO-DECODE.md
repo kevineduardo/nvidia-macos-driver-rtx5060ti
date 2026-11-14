@@ -127,6 +127,20 @@ software decode of the picture with that time):
 Two 4K streams cannot both run at 60 pictures a second on this card: 120 pictures of 8 ms are all of the one NVDEC
 engine's time. Open: the 16-steps left with two streams, and the first seconds, before the pace settles.
 
+### Two sessions in one process
+
+`realtime.sh` runs one process per stream; the screen saver runs both players in one. With two players in one process
+(`tools/blackwell-video/avplay2.swift`) about one start in three ended in software decoding (seven cores busy, 10
+pictures a second): `startSession: HEVC 0x0 (coded 0x0), 0-bit, chroma -1 - NOT SUPPORTED`. The H.264 and HEVC parsers
+kept their bit reader in a `static` (8 KB, to stay off the stack), so two sessions parsing at once read each other's
+bytes: a parameter set at session start, or a slice header later (`hevcdec: slice header parse failed`). The readers,
+the AV1 tile list and film-grain scratch, and the other function statics are now `_Thread_local`
+(`tools/test_nvencvt_blackwell.py` refuses a new shared one). 12 starts of two players in a row, none failed.
+
+Tried and not kept: non-temporal stores in the copy out (pictures shown +3%, CPU -5% with two streams, inside the run
+to run spread). The spin in `chan_wait` now pauses between reads (`_mm_pause`), which leaves the engine wait's
+timing as it was.
+
 ## Performance (AVFoundation, RTX 5060 Ti)
 
 | stream | fps | per picture inside the decoder |

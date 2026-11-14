@@ -104,6 +104,12 @@ NV_STATUS chan_submit(Chan *c)
     return NV_OK;
 }
 
+#if defined(__x86_64__) || defined(__i386__)
+#include <immintrin.h>
+#define NV_CPU_PAUSE() _mm_pause()
+#else
+#define NV_CPU_PAUSE() ((void)0)
+#endif
 bool chan_wait(Chan *c, volatile const NvU32 *sem, NvU32 val, double timeout_ms)
 {
     // Spin until the semaphore holds val. A picture still not done after 50 ms (4K takes under 20) gets the doorbell
@@ -113,6 +119,7 @@ bool chan_wait(Chan *c, volatile const NvU32 *sem, NvU32 val, double timeout_ms)
     struct timespec t; NV_CLOCK_GETTIME(CLOCK_MONOTONIC, &t);
     const double t0 = t.tv_sec * 1e3 + t.tv_nsec / 1e6; double kick = t0 + 50, now = t0; unsigned kicks = 0;
     while (*sem != val && now - t0 < timeout_ms) {
+        NV_CPU_PAUSE();   // the spin costs a core either way; this leaves the core's other thread its share and saves power
         NV_CLOCK_GETTIME(CLOCK_MONOTONIC, &t); now = t.tv_sec * 1e3 + t.tv_nsec / 1e6;
         if (now > kick) { *c->doorbell = c->token; kick += 50; kicks++; }
     }

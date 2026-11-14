@@ -218,7 +218,7 @@ int vc1dec_simple_main_frame(Vc1Dec *d, const uint8_t *buf, size_t len)
         if (rb(&b, 3) == 7 && rb(&b, 4) == 15) type = 3;      // BFRACTION 1111111 = BI picture
     } else type = 0;
     // the engine wants a frame start code before a Simple / Main frame (nvtegra)
-    static uint8_t tmp[1 << 22];
+    static _Thread_local uint8_t tmp[1 << 22];
     if (len + 4 > sizeof tmp) { fprintf(stderr, "vc1dec: frame too large\n"); return -1; }
     tmp[0] = 0; tmp[1] = 0; tmp[2] = 1; tmp[3] = 0x0d; memcpy(tmp + 4, buf, len);
     const NvU32 off0 = 0;

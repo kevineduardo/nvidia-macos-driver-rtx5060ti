@@ -7,6 +7,7 @@
 
 ### Video playback
 - Judder in the aerial screen savers (HEVC 4K 240 fps, one stream per monitor) and in any stream the decoder cannot keep up with: the player dropped pictures in bursts. The HEVC decoder now leaves out the temporal sub-layers it cannot afford in real-time playback, which leaves evenly spaced pictures: one stream plays at 60 pictures a second instead of 27 uneven ones, and the screen saver process uses one core per stream instead of three and a half. `NVDEC_NO_PACE=1` turns it off.
+- Two videos decoding in one process (the screen saver on two monitors, two videos in a browser) no longer disturb each other: the H.264 and HEVC parsers shared one bit reader between threads, so about one in three HEVC sessions that started together failed to start (the system then decoded in software, on every core) and slice headers could be misread. Parser and AV1 scratch state is now per thread.
 - The decoder recognises its pixel format in a client's list of formats (VideoToolbox converted every picture otherwise), and copies pictures out on two threads instead of on every core.
 
 ### Video on RTX 50 (Blackwell)
