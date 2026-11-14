@@ -2,6 +2,9 @@
 
 ## Unreleased (rtx5060ti branch)
 
+### Fixes
+- Two minutes of black screen at the start after a library in the plugin bundle was replaced: sealing the bundle with `codesign --deep` signed the shader translator again, the shader cache was named after that file's digest, every process swept its cache, and WindowServer waited on the translations until the watchdog killed it. The cache is now named after the translator's content without its signature (docs/SHADER-CACHE-TAG.md); `tools/install_bundle_file.sh` replaces one file of the bundle without touching the others, and `tools/migrate_shader_cache_tag.sh` keeps the caches across the change.
+
 ### Video on RTX 50 (Blackwell)
 - Hardware VP9 and AV1 decode (8- and 10-bit) through libnvencvt, bit-exact against software decodes on an RTX 5060 Ti. Blackwell needs one more NVDEC method (0x4dc) and picture-setup fields Ada's headers do not have; see docs/BLACKWELL-VIDEO-DECODE.md. Turn it on with `NVMTL_NVENCVT=1` in `/Library/GPUBundles/nvmtl/nvrm610.conf`.
 - Decoding no longer stops after about 200 pictures (the push buffer was never reused on Blackwell) and no longer loses a picture now and then under AVFoundation (GPPut is read back before the doorbell).

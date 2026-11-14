@@ -17,6 +17,12 @@ same rating are registered and VideoToolbox picks either. The injected library r
 contains "nvencvt" (`libx.dylib` loads and silently does nothing; VideoToolbox then uses another decoder). In zsh, put such variables on the command line itself: a `$VAR`
 holding several `A=B` words is not split.
 
+## Installing a build
+
+`tools/install_bundle_file.sh $WORK/libnvencvt.dylib libnvencvt.dylib` (signs that file only, seals the bundle without
+`--deep`, stops if anything else in it changed). Never `codesign --deep` the installed bundle: see
+[docs/SHADER-CACHE-TAG.md](../../docs/SHADER-CACHE-TAG.md) for the two-minute black screen that caused.
+
 ## Running
 
 ```sh

@@ -109,7 +109,10 @@ kexts/NMKbdBacklight  The keyboard backlight plugin follows the structure of Vir
              them in. No code was copied from them; the code here is NullMoth's own.
 
 rtx5060ti fork additions  MIT, Copyright (c) 2026 kevineduardo (licenses/rtx5060ti-fork-MIT.txt): tools/blackwell-video/,
-             docs/BLACKWELL-VIDEO-DECODE.md, vendor/nvenc/src/nvdec_blackwell.h, and the fork's changes inside vendor/nvenc
+             docs/BLACKWELL-VIDEO-DECODE.md, docs/SHADER-CACHE-TAG.md, plugin/nvmtl_translator_tag.h,
+             tools/test_translator_tag.py, tools/translator_tag.c, tools/migrate_shader_cache_tag.sh,
+             tools/install_bundle_file.sh, build/build_plugin_release_local.sh,
+             vendor/nvenc/src/nvdec_blackwell.h, and the fork's changes inside vendor/nvenc
              (MIT like the library they change). The Blackwell NVDEC values they use are facts of the hardware interface,
              cross-checked against the AROS nvgfx driver, cagedbird043/nvrm and tinygrad (MIT); no code was taken from them.
              Changes the fork makes to files that were already in this tree stay under this tree's licence.

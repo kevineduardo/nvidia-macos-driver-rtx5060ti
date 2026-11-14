@@ -6,7 +6,7 @@
 #
 # Keeps the shader caches across a change of the cache's build tag when the translator itself did not change (the
 # plugin that takes the tag from the translator's content instead of the whole signed file, plugin/nvmtl_translator_tag.h).
-# Without it every process sweeps its cache on its first start with the new plugin, and WindowServer waits on hundreds
+# See docs/SHADER-CACHE-TAG.md. Without it every process sweeps its cache on its first start with the new plugin, and WindowServer waits on hundreds
 # of translations at the next boot (two minutes of black screen on an RTX 5060 Ti).
 #
 # Every cache entry carries the tag in its NAME only (<digest>.<kind>.<tag><modes>.c3.spv, idx2-<lib>.<tag><modes>.plist;

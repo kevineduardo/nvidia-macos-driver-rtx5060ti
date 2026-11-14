@@ -1,3 +1,5 @@
+/* SPDX-License-Identifier: MIT
+   Copyright (c) 2026 kevineduardo */
 /* nvmtl_translator_tag.h - the shader cache's build tag: which translator made an entry.
    The tag was the SHA-256 of the whole libnvmtl_translate.dylib file, code signature included. Signing the same
    translator again (codesign --deep over the bundle after one library in it was replaced) gave the file another hash:
