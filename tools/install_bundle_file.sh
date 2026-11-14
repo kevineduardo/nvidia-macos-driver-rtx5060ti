@@ -12,7 +12,7 @@
 # cache's tag from the translator's content (plugin/nvmtl_translator_tag.h), that changed the tag, every process swept
 # its shader cache, and the next boot left the screen black for two minutes while WindowServer translated everything and
 # the watchdog killed it once. This signs only the new file, seals without --deep, and STOPS if any other file of the
-# bundle changed.
+# bundle changed (the main executable is signed again by the seal: its code, by LC_UUID, must be the same).
 #   - the old file and the old seal go to /Library/NullMoth/backup-bundle-<time>/
 #   - the new file is put in place by rename, so a process that has the old one mapped keeps it
 #   - processes started afterwards load the new file; WindowServer keeps the old one until the next restart
@@ -22,7 +22,11 @@ B=${NVMTL_BUNDLE:-/Library/GPUBundles/NVMTLDriver.bundle}; M=$B/Contents/MacOS
 [ -f "$NEW" ] || { echo "STOP: $NEW does not exist"; exit 1; }
 [ -f "$M/$NAME" ] || { echo "STOP: $M/$NAME does not exist (this replaces a file, it does not add one)"; exit 1; }
 lipo -archs "$NEW" 2>/dev/null | grep -qw x86_64 || { echo "STOP: $NEW is not an x86_64 Mach-O"; exit 1; }
-sums() { (cd "$M" && find . -type f ! -name "$NAME" ! -name ".$NAME.new" -exec shasum -a 256 {} + | LC_ALL=C sort -k2); }
+# Every other file by its digest. The bundle's main executable is the exception: sealing the bundle signs it again
+# (its signature carries the seal), so it is compared by its LC_UUID, which is its code.
+MAIN=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$B/Contents/Info.plist" 2>/dev/null || echo NVMTLDriver)
+sums() { (cd "$M" && find . -type f ! -name "$NAME" ! -name ".$NAME.new" ! -name "$MAIN" -exec shasum -a 256 {} + | LC_ALL=C sort -k2
+          [ "$NAME" = "$MAIN" ] || echo "uuid $(otool -l "$MAIN" | awk '/uuid/{print $2; exit}')  ./$MAIN"); }
 before=$(sums)
 BK=${NVMTL_BACKUP_ROOT:-/Library/NullMoth}/backup-bundle-$(date +%Y%m%d-%H%M%S)
 sudo mkdir -p "$BK"; sudo cp -p "$M/$NAME" "$BK/"; sudo cp -Rp "$B/Contents/_CodeSignature" "$BK/_CodeSignature"; sudo chmod 700 "$BK"
