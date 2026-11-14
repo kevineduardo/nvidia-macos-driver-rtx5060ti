@@ -32,6 +32,29 @@ Changes made here, in this order of importance:
                  - vt/: card kinds for Blackwell (H.264 decoder only) and TU10x / TU116 (decoders only), by PCI device ID.
                  Not run on a card yet. Nothing registers on these cards unless NVMTL_NVENCVT names the process or is 1.
 
+  VP9 and AV1 decode on Blackwell (tools/test_nvencvt_blackwell.py), checked bit-exact on an RTX 5060 Ti against FFmpeg's
+  software decoders (libvpx and AV1 conformance vectors and generated streams: 8- and 10-bit, inter frames, 4x4 tiles,
+  error resilient, SVC, 4K):
+                 - src/nvdec_blackwell.h: method 0x4dc (a buffer the engine needs for inter pictures; without it every
+                   inter picture ends in a channel error) and the picture setup's Blackwell fields (the planes' GOB kinds
+                   and surface format code, which make the engine write the Blackwell plane layouts its inter prediction
+                   reads; VP9 +0x108 / AV1 +0x244 units word; AV1 reserved12 = 0xffff). Sources: the methods NullMoth's own
+                   HEVC decoder sends on that card (captured from its push buffer), and the values the AROS nvgfx driver
+                   and cagedbird043/nvrm record from NVIDIA's driver on class CFB0 (facts of the interface, no code taken);
+                 - src/vp9dec.c, src/av1dec.c: planes read, edge-extended and migrated in the card's layout (gob_*);
+                 - vt/nvencvt_dec.c: VP9 and AV1 register on Blackwell; HEVC and MPEG stay off there.
+                 - src/vp9dec.c, src/av1dec.c: chan_done() after each completion, as src/dec.c: Blackwell's channel class
+                   reports no GPGet, so the 64 KB push buffer was never reused and decoding stopped after ~200 pictures;
+                 - src/blocklinear.c: gob_untile_plane copies whole Blackwell tiles without per-run offset arithmetic
+                   (4K 8-bit AV1: 5.2 -> 3.4 ms per picture), checked sample by sample against gob_offset.
+                 - src/channel.c: GPPut read back before the doorbell (USERD is write-combined video memory; the host now
+                   and then fetched the old GPPut and never ran the picture: 7 of 9600 4K AV1 pictures under AVFoundation,
+                   0 with the read), chan_wait() rings the doorbell again for a picture 50 ms late (dec.c, vp9dec.c,
+                   av1dec.c), and the push buffer wraps once half used instead of after every picture;
+                 - 10-bit VP9 / AV1 for a client that asks for 8-bit NV12 (AVAssetReader, transcoders): narrowed while
+                   untiled (gob_untile_plane_narrow, (v + 0x80) >> 8), not converted by VideoToolbox afterwards
+                   (4K: 16 -> 93 fps; identical to the software decode rounded the same way). NVDEC_NONARROW=1: as before.
+
 Where upstream's own facts come from (read before calling this library clean of NVIDIA's closed driver): the decoders'
 picture setups are open-gpu-doc's nvdec_drv.h. The ENCODERS' per-picture control blocks (src/h264enctmpl.h,
 hevcenctmpl.h, av1enctmpl.h) are byte tables that upstream generated from traces of NVIDIA's Linux driver encoding on

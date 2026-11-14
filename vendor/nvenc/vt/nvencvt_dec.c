@@ -462,6 +462,20 @@ static OSStatus d_startSession(VTVideoDecoderRef o, VTVideoDecoderSession sessio
 static OSStatus set_output(DState *s, VTVideoDecoderSession session, CMVideoFormatDescriptionRef fmt, OSType pf, bool full)
 {
     OSStatus st;
+    // A 10-bit VP9 / AV1 stream for a client that asked for the same range in 8 bits (AVAssetReader, transcoders): the
+    // picture is narrowed while it is untiled (read_nv12_8bit), so the output format is the client's and VideoToolbox
+    // has nothing to convert (it took 63 ms per 4K picture). NVDEC_NONARROW=1 leaves the conversion to VideoToolbox.
+    if ((s->codec == CODEC_VP9 || s->codec == CODEC_AV1) && !getenv("NVDEC_NONARROW") &&
+        (pf == kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange || pf == kCVPixelFormatType_420YpCbCr10BiPlanarFullRange)) {
+        CFDictionaryRef dst = VTDecoderSessionGetDestinationPixelBufferAttributes(session);
+        CFNumberRef dpf = dst ? CFDictionaryGetValue(dst, kCVPixelBufferPixelFormatTypeKey) : NULL; OSType want = 0;
+        const OSType eight = pf == kCVPixelFormatType_420YpCbCr10BiPlanarFullRange ? kCVPixelFormatType_420YpCbCr8BiPlanarFullRange
+                                                                                 : kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange;
+        if (dpf && CFGetTypeID(dpf) == CFNumberGetTypeID() && CFNumberGetValue(dpf, kCFNumberSInt32Type, &want) && want == eight) {
+            DLOG("10-bit stream, 8-bit client: narrowed while untiled");
+            pf = eight;
+        }
+    }
     s->pf = pf;
     if (gDLog) {   // what the client asked for (T8.06: matching it avoids a conversion inside EmitDecodedFrame)
         CFDictionaryRef dst = VTDecoderSessionGetDestinationPixelBufferAttributes(session);
@@ -571,8 +585,10 @@ static void out_copy(DState *s, OutJob *j)
     CVPixelBufferLockBaseAddress(pb, 0);
     uint8_t *y = CVPixelBufferGetBaseAddressOfPlane(pb, 0), *uv = CVPixelBufferGetBaseAddressOfPlane(pb, 1);
     const size_t ys = CVPixelBufferGetBytesPerRowOfPlane(pb, 0), uvs = CVPixelBufferGetBytesPerRowOfPlane(pb, 1);
-    if (s->codec == CODEC_VP9) vp9dec_read_nv12(s->vp9, j->surf, y, ys, uv, uvs, j->w, j->h);
-    else if (s->codec == CODEC_AV1) av1dec_read_nv12(s->av1, j->surf, y, ys, uv, uvs, j->w, j->h);
+    const OSType bpf = CVPixelBufferGetPixelFormatType(pb);   // 8-bit buffer for a 16-bit session: narrowed (set_output)
+    const bool eight = bpf == kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange || bpf == kCVPixelFormatType_420YpCbCr8BiPlanarFullRange;
+    if (s->codec == CODEC_VP9) (eight ? vp9dec_read_nv12_8bit : vp9dec_read_nv12)(s->vp9, j->surf, y, ys, uv, uvs, j->w, j->h);
+    else if (s->codec == CODEC_AV1) (eight ? av1dec_read_nv12_8bit : av1dec_read_nv12)(s->av1, j->surf, y, ys, uv, uvs, j->w, j->h);
     else if (s->codec == kCMVideoCodecType_HEVC) hevcdec_read_nv12(s->hevc, j->surf, y, ys, uv, uvs, j->w, j->h, j->cx, j->cy);
     else if (is_mpeg12(s->codec)) mpeg2dec_read_nv12(s->m2, j->surf, y, ys, uv, uvs, j->w, j->h);
     else if (s->codec == kCMVideoCodecType_MPEG4Video) mpeg4dec_read_nv12(s->m4, j->surf, y, ys, uv, uvs, j->w, j->h);
@@ -974,10 +990,12 @@ OSStatus NVDecVT_Register(int rating)
     extern int gNvencvtGpu;   // vt/nvencvt.c: 1 Ada, 2 TU117 (GTX 1650: NVDEC 0xc4b0 has no AV1), 3 GA10x (RTX 30)
     const bool ampere = gNvencvtGpu == 3;
     const bool av1Vp9Only = ampere && !getenv("NVENCVT_AMPERE_ALL_DEC");
-    // Blackwell (4): H.264 alone. Its channel and NVDEC classes and the layout of its decoded planes are public
-    // (open-gpu-kernel-modules, Mesa NIL) and the H.264 picture setup is nvdec_drv.h's, but no public header lists the
-    // methods of class 0xcfb0, and the other codecs' decoders here untile every plane as Turing's.
-    const bool h264Only = gNvencvtGpu == 4;
+    // Blackwell (4): H.264, VP9 and AV1, each bit-exact against software decodes on an RTX 5060 Ti (8- and 10-bit, inter
+    // frames, tiles, 4K). Ada's methods (clc9b0.h) are the ones used, plus what Blackwell adds for VP9 and AV1
+    // (src/nvdec_blackwell.h: method 0x4dc and the picture setup's plane kinds). HEVC and MPEG stay on NullMoth's own
+    // decoders there: our HEVC decoder lacks those additions (its inter frames fail); NVENCVT_BLACKWELL_ALL_DEC=1
+    // registers them anyway, for that work.
+    const bool h264Only = gNvencvtGpu == 4 && !getenv("NVENCVT_BLACKWELL_ALL_DEC");
     typedef OSStatus (*RegFn)(FourCharCode, CFDictionaryRef, void *);
     RegFn reg = (RegFn)dlsym(RTLD_DEFAULT, "VTRegisterVideoDecoderWithInfo");
     if (!reg) { DLOG("VTRegisterVideoDecoderWithInfo not found"); return kVTCouldNotFindVideoDecoderErr; }
@@ -999,7 +1017,7 @@ OSStatus NVDecVT_Register(int rating)
         CFRelease(ih);
         DLOG("registered %s -> %d (rating %d)", DECODER_ID_HEVC, (int)sh, rating);
     }
-    if (!h264Only && !getenv("NVENCVT_NO_VP9DEC")) {
+    if (!getenv("NVENCVT_NO_VP9DEC")) {
         const void *v9[] = { CFSTR(DECODER_ID_VP9), CFSTR("NVDEC - VP9 - mickys/nvenc"), nr, kCFBooleanTrue };
         CFDictionaryRef i9 = CFDictionaryCreate(NULL, k, v9, 4, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
         OSStatus s9 = reg(CODEC_VP9, i9, (void *)NVDecVT_CreateInstance);
@@ -1017,7 +1035,7 @@ OSStatus NVDecVT_Register(int rating)
     // Ada's and Turing's class is known from the card (the PCI device ID), so RM is asked only for GA10x and for cards the
     // registry does not name - and RM answering 0 (no driver) means no AV1 decoder at all.
     const NvU32 nvcls = gNvencvtGpu == 1 ? 0xc9b0 : gNvencvtGpu == 2 || gNvencvtGpu == 5 ? 0xc4b0 : gNvencvtGpu == 4 ? 0xcfb0 : nvdec_class();
-    const bool hasAv1 = nvcls == 0xc7b0 || nvcls == 0xc9b0;
+    const bool hasAv1 = nvcls == 0xc7b0 || nvcls == 0xc9b0 || nvcls == 0xcfb0;
     DLOG("NVDEC class 0x%x%s", nvcls, hasAv1 ? " (AV1)" : " (no AV1)");
     if (!getenv("NVENCVT_NO_AV1DEC") && hasAv1) {   // AV1 likewise (NVENCVT_NO_AV1DEC=1 leaves it out)
         const void *va[] = { CFSTR(DECODER_ID_AV1), CFSTR("NVDEC - AV1 - mickys/nvenc"), nr, kCFBooleanTrue };

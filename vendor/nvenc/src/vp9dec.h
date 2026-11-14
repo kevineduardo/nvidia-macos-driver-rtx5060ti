@@ -15,6 +15,8 @@ typedef struct {
     unsigned maxW, maxH;            // allocation size (pixels, multiple of 64)
     int bit_depth, bps;             // the session's bit depth; bytes per sample (1, or 2 for 10/12-bit)
     size_t pitch;                   // bytes
+    int gobY, gobC;                 // how the bytes of a decoded luma / chroma plane lie (blocklinear.h)
+    RmMem inter_scratch;            // Blackwell only (nvdec_blackwell.h); size 0 elsewhere
     RmMem setup, bs, probs, counts, seg[2], tiles, colmv[2], filter, intra, status, sem;
     RmMem luma[VP9_SURFACES], chroma[VP9_SURFACES];
     unsigned w[VP9_SURFACES], h[VP9_SURFACES];  // the size each surface was decoded at
@@ -47,5 +49,7 @@ void vp9dec_release(Vp9Dec *d, int surf);
 // past the session it started in. `from` can be closed afterwards.
 int  vp9dec_migrate(Vp9Dec *to, const Vp9Dec *from);
 void vp9dec_read_nv12(Vp9Dec *d, int surf, uint8_t *y, size_t ystride, uint8_t *uv, size_t uvstride, unsigned w, unsigned h);
+// a 16-bit session's picture as 8-bit NV12 (rounded), for a client that asked for 8 bits
+void vp9dec_read_nv12_8bit(Vp9Dec *d, int surf, uint8_t *y, size_t ystride, uint8_t *uv, size_t uvstride, unsigned w, unsigned h);
 // I420 (8-bit) or yuv420p10le / 12le (16-bit little-endian samples, value in the low bits) for 10/12-bit sessions
 void vp9dec_read_i420(Vp9Dec *d, int surf, uint8_t *dst, unsigned w, unsigned h);

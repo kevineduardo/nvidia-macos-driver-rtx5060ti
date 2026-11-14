@@ -10,6 +10,7 @@
 #include "class/clc56f.h"
 #include "class/cl2080_notification.h"
 #include "clc9b0.h"
+#include "nvdec_blackwell.h"
 #include "nvdec_drv.h"
 
 static NvU32 hi(NvU64 a) { return (NvU32)(a >> 8); }
@@ -22,6 +23,8 @@ int vp9dec_open(Vp9Dec *d, Rm *rm, unsigned maxW, unsigned maxH, int bit_depth)
     d->bit_depth = bit_depth; d->bps = bit_depth > 8 ? 2 : 1;
     d->turing = rm_class(rm, RM_CLS_NVDEC) == 0xc4b0;
     d->pitch = (size_t)d->maxW * (size_t)d->bps;
+    // Decoded planes: on Blackwell in its own layouts, which the picture setup names (nvdec_blackwell.h's plane kinds)
+    d->gobY = gob_layout_for(rm_class(rm, RM_CLS_NVDEC), (unsigned)d->bps); d->gobC = gob_layout_for(rm_class(rm, RM_CLS_NVDEC), 2u * (unsigned)d->bps);
     for (int i = 0; i < 8; i++) d->ref[i] = -1;
     vp9_init(&d->st);
     NV_NVDEC_ALLOCATION_PARAMETERS dp = { .size = sizeof dp, .prohibitMultipleInstances = 0, .engineInstance = 0 };
@@ -49,6 +52,11 @@ int vp9dec_open(Vp9Dec *d, Rm *rm, unsigned maxW, unsigned maxH, int bit_depth)
     for (int i = 0; i < VP9_SURFACES; i++)
         if (rm_mem_alloc(rm, &d->luma[i], (luma + 0xfff) & ~(size_t)0xfff, 0x1000, true, true, true) ||
             rm_mem_alloc(rm, &d->chroma[i], (chroma + 0xfff) & ~(size_t)0xfff, 0x1000, true, true, true)) { fprintf(stderr, "vp9dec: surface alloc failed\n"); return -1; }
+    if (rm_class(rm, RM_CLS_NVDEC) == NVDEC_CLASS_BLACKWELL) {
+        const size_t n = NVCFB0_INTER_SCRATCH_SIZE(d->maxW, d->maxH);
+        if (rm_mem_alloc(rm, &d->inter_scratch, n, 0x1000, true, true, true)) { fprintf(stderr, "vp9dec: alloc failed\n"); return -1; }
+        memset(d->inter_scratch.cpu, 0, d->inter_scratch.size);
+    }
     chan_mthd(&d->chan, 0, NVC56F_SET_OBJECT, 1, rm_class(rm, RM_CLS_NVDEC));
     return 0;
 }
@@ -60,13 +68,16 @@ void vp9dec_close(Vp9Dec *d)
                    &d->filter, &d->intra, &d->status, &d->sem };
     for (size_t i = 0; i < sizeof m / sizeof m[0]; i++) rm_mem_free(d->rm, m[i]);
     for (int i = 0; i < VP9_SURFACES; i++) { rm_mem_free(d->rm, &d->luma[i]); rm_mem_free(d->rm, &d->chroma[i]); }
+    if (d->inter_scratch.size) rm_mem_free(d->rm, &d->inter_scratch);
 }
 
 void vp9dec_release(Vp9Dec *d, int surf) { if (surf >= 0 && surf < VP9_SURFACES) d->busy[surf] = false; }
 
+// whole 64-byte x 16-row tiles of 1 KB: every generation's layout keeps a tile's bytes inside its tile (blocklinear.h)
 static void copy_plane(uint8_t *dst, size_t dpitch, const uint8_t *src, size_t spitch, size_t bytes, size_t rows)
 {
-    for (size_t y = 0; y < rows; y++) for (size_t x = 0; x < bytes; x += 16) memcpy(dst + nvenc_in_offset(x, y, dpitch), src + nvenc_in_offset(x, y, spitch), 16);
+    for (size_t ty = 0; ty < (rows + 15) / 16; ty++)
+        for (size_t tx = 0; tx < (bytes + 63) / 64; tx++) memcpy(dst + ty * dpitch * 16 + tx * 1024, src + ty * spitch * 16 + tx * 1024, 1024);
 }
 
 int vp9dec_migrate(Vp9Dec *to, const Vp9Dec *from)
@@ -93,14 +104,21 @@ int vp9dec_migrate(Vp9Dec *to, const Vp9Dec *from)
 void vp9dec_read_nv12(Vp9Dec *d, int surf, uint8_t *y, size_t ystride, uint8_t *uv, size_t uvstride, unsigned w, unsigned h)
 {
     const size_t b = (size_t)d->bps;
-    nvenc_in_untile_plane(y, ystride, d->luma[surf].cpu, w * b, h, d->pitch);
-    nvenc_in_untile_plane(uv, uvstride, d->chroma[surf].cpu, ((w + 1) & ~1u) * b, (h + 1) / 2, d->pitch);
+    gob_untile_plane(d->gobY, y, ystride, d->luma[surf].cpu, w * b, h, d->pitch);
+    gob_untile_plane(d->gobC, uv, uvstride, d->chroma[surf].cpu, ((w + 1) & ~1u) * b, (h + 1) / 2, d->pitch);
 }
 
-static unsigned sample(const uint8_t *p, size_t x, size_t y, size_t pitch, int bps, int shift)
+void vp9dec_read_nv12_8bit(Vp9Dec *d, int surf, uint8_t *y, size_t ystride, uint8_t *uv, size_t uvstride, unsigned w, unsigned h)
 {
-    if (bps == 1) return p[nvenc_in_offset(x, y, pitch)];
-    const size_t o = nvenc_in_offset(2 * x, y, pitch);      // a 16-bit sample never straddles a 16-byte run
+    if (d->bps != 2) { vp9dec_read_nv12(d, surf, y, ystride, uv, uvstride, w, h); return; }
+    gob_untile_plane_narrow(d->gobY, y, ystride, d->luma[surf].cpu, (size_t)w * 2, h, d->pitch);
+    gob_untile_plane_narrow(d->gobC, uv, uvstride, d->chroma[surf].cpu, (size_t)((w + 1) & ~1u) * 2, (h + 1) / 2, d->pitch);
+}
+
+static unsigned sample(const uint8_t *p, int gob, size_t x, size_t y, size_t pitch, int bps, int shift)
+{
+    if (bps == 1) return p[gob_offset(gob, x, y, pitch)];
+    const size_t o = gob_offset(gob, 2 * x, y, pitch);      // a 16-bit sample never straddles a 16-byte run
     return (unsigned)(p[o] | p[o + 1] << 8) >> shift;
 }
 
@@ -111,10 +129,10 @@ void vp9dec_read_i420(Vp9Dec *d, int surf, uint8_t *dst, unsigned w, unsigned h)
     const int b = d->bps, sh = b == 2 ? 16 - d->bit_depth : 0;   // the engine writes 10/12-bit samples MSB-aligned (like P010)
     #define PUT(i, v) do { if (b == 1) dst[i] = (uint8_t)(v); else { dst[2 * (i)] = (uint8_t)(v); dst[2 * (i) + 1] = (uint8_t)((v) >> 8); } } while (0)
     const size_t U = (size_t)w * h, V = U + (size_t)cw * ch;
-    for (unsigned y = 0; y < h; y++) for (unsigned x = 0; x < w; x++) PUT((size_t)y * w + x, sample(L, x, y, d->pitch, b, sh));
+    for (unsigned y = 0; y < h; y++) for (unsigned x = 0; x < w; x++) PUT((size_t)y * w + x, sample(L, d->gobY, x, y, d->pitch, b, sh));
     for (unsigned y = 0; y < ch; y++) for (unsigned x = 0; x < cw; x++) {
-        PUT(U + (size_t)y * cw + x, sample(C, 2 * x, y, d->pitch, b, sh));
-        PUT(V + (size_t)y * cw + x, sample(C, 2 * x + 1, y, d->pitch, b, sh));
+        PUT(U + (size_t)y * cw + x, sample(C, d->gobC, 2 * x, y, d->pitch, b, sh));
+        PUT(V + (size_t)y * cw + x, sample(C, d->gobC, 2 * x + 1, y, d->pitch, b, sh));
     }
     #undef PUT
 }
@@ -161,15 +179,16 @@ static void pack_probs(nvdec_vp9EntropyProbs_t *e, const Vp9Probs *p, const Vp9F
 // The engine reads reference samples up to the superblock-aligned size and does not clamp them at the frame edge, which
 // the spec does (8.5.2.4: every read is clipped to the last row / column), so the right and bottom padding of each
 // reference must repeat the edge (T10.03: the 8x8 and 66x66 test vectors). g = bytes per sample (pair, for chroma).
-static void extend_plane(uint8_t *p, size_t pitch, unsigned w, unsigned h, unsigned aw, unsigned ah, unsigned g)
+static void extend_plane(uint8_t *p, int gob, size_t pitch, unsigned w, unsigned h, unsigned aw, unsigned ah, unsigned g)
 {
     if (aw > w)
         for (unsigned y = 0; y < h; y++) {
-            const uint8_t *src = p + nvenc_in_offset((size_t)(w - 1) * g, y, pitch);   // a whole group: g divides 16
-            for (size_t x = (size_t)w * g; x < (size_t)aw * g; x++) p[nvenc_in_offset(x, y, pitch)] = src[x % g];
+            const uint8_t *src = p + gob_offset(gob, (size_t)(w - 1) * g, y, pitch);   // a whole group: g divides 8
+            for (size_t x = (size_t)w * g; x < (size_t)aw * g; x++) p[gob_offset(gob, x, y, pitch)] = src[x % g];
         }
+    // 8-byte runs lie together in every layout (Blackwell8Bit's columns are 8 bytes wide)
     for (unsigned y = h; y < ah; y++)
-        for (size_t x = 0; x < (size_t)aw * g; x += 16) memcpy(p + nvenc_in_offset(x, y, pitch), p + nvenc_in_offset(x, h - 1, pitch), 16);
+        for (size_t x = 0; x < (size_t)aw * g; x += 8) memcpy(p + gob_offset(gob, x, y, pitch), p + gob_offset(gob, x, h - 1, pitch), 8);
 }
 
 static void extend_edges(Vp9Dec *d, int surf, unsigned w, unsigned h)
@@ -177,8 +196,8 @@ static void extend_edges(Vp9Dec *d, int surf, unsigned w, unsigned h)
     const unsigned aw = (w + 63) & ~63u, ah = (h + 63) & ~63u;
     if (aw == w && ah == h) return;
     const unsigned b = (unsigned)d->bps;
-    extend_plane(d->luma[surf].cpu, d->pitch, w, h, aw, ah, b);
-    extend_plane(d->chroma[surf].cpu, d->pitch, (w + 1) / 2, (h + 1) / 2, aw / 2, ah / 2, 2 * b);
+    extend_plane(d->luma[surf].cpu, d->gobY, d->pitch, w, h, aw, ah, b);
+    extend_plane(d->chroma[surf].cpu, d->gobC, d->pitch, (w + 1) / 2, (h + 1) / 2, aw / 2, ah / 2, 2 * b);
 }
 
 static int tile_offset(int n, int mis, int log2) { int sbs = (mis + 7) >> 3, o = ((n * sbs) >> log2) << 3; return o < mis ? o : mis; }
@@ -270,6 +289,13 @@ int vp9dec_frame(Vp9Dec *d, const uint8_t *buf, size_t n)
     for (int i = 0; i < 2; i++) ps->mbModeLfDelta[i] = (char)d->st.lf_mode_deltas[i];
     ps->v1.Vp9FltAboveOffset = (unsigned)(d->flt_above >> 8);
     ps->v1.bit_depth = (unsigned)f->bit_depth;
+    if (d->inter_scratch.size) {
+        // Blackwell's additions to the picture setup (nvdec_blackwell.h): the planes' kinds, the surface format code,
+        // and after the 256-byte structure the width of the 0x4dc area in its units
+        ps->reserved5 = (char)NVCFB0_PLANE_KINDS(d->bps);
+        ps->reserved1[2] = (unsigned char)NVCFB0_SURFACE_FORMAT(f->bit_depth);
+        *(NvU32 *)((uint8_t *)d->setup.cpu + 0x108) = NVCFB0_BLK_UNITS(f->width);
+    }
 
     Chan *c = &d->chan;
     chan_rewind(c);
@@ -292,6 +318,7 @@ int vp9dec_frame(Vp9Dec *d, const uint8_t *buf, size_t n)
     // sends none (docs/traces/vp9dec-gtx1650-linux); given one, that engine used the buffer as 32 bytes per superblock, decoded
     // frames that keep the segmentation map as if segmentation were off and faulted when the buffer was smaller than that
     if (!d->turing) chan_mthd(c, 0, NVC9B0_SET_INTRA_TOP_BUF_OFFSET, 1, hi(d->intra.gpu));
+    if (d->inter_scratch.size) chan_mthd(c, 0, NVCFB0_SET_INTER_SCRATCH_OFFSET, 1, hi(d->inter_scratch.gpu));   // Blackwell
     const int sfc[4] = { rs[0], rs[1], rs[2], surf };          // VP9_LAST/GOLDEN/ALTREF/CURR_FRAME_SFC
     for (int i = 0; i < 4; i++) {
         chan_mthd(c, 0, NVC9B0_SET_PICTURE_LUMA_OFFSET0 + 4 * (NvU32)i, 1, hi(d->luma[sfc[i]].gpu));
@@ -304,9 +331,17 @@ int vp9dec_frame(Vp9Dec *d, const uint8_t *buf, size_t n)
               DRF_DEF(C9B0, _SEMAPHORE_D, _OPERATION, _RELEASE) | DRF_DEF(C9B0, _SEMAPHORE_D, _PAYLOAD_SIZE, _32BIT));
     const double t0 = now_ms();
     chan_submit(c);
-    while (sv[0] != val && now_ms() - t0 < 1000) { }
+    chan_wait(c, sv, val, 1000);
     d->engine_ms = now_ms() - t0;
-    if (sv[0] != val) { fprintf(stderr, "vp9dec: no completion (error notifier 0x%x)\n", chan_error(c)); return -1; }
+    if (sv[0] != val) {
+        NvU64 fa = 0; NvU32 ft = 0; char fs[32] = "";
+        fprintf(stderr, "vp9dec: no completion (error notifier 0x%x)\n", chan_error(c));
+        if (chan_error(c) && !chan_fault(c, &fa, &ft, fs) && fa) fprintf(stderr, "vp9dec: MMU fault at 0x%llx type %u %s\n", (unsigned long long)fa, ft, fs);
+        return -1;
+    }
+    // the engine is done with the push buffer: it may start over (Blackwell's channel class reports no GPGet, so
+    // chan_rewind would otherwise never reuse it and the 64 KB filled after ~200 pictures; dec.c does the same)
+    chan_done(c);
     const nvdec_status_s *st = d->status.cpu;
     d->err_status = st->error_status; d->ok_blocks = st->mbs_correctly_decoded;
     if (d->verbose)

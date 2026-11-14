@@ -1,5 +1,7 @@
 // channel.c: see channel.h.
 #include "channel.h"
+#include "nv_floor.h"
+#include <time.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <string.h>
@@ -93,14 +95,36 @@ NV_STATUS chan_submit(Chan *c)
     __atomic_thread_fence(__ATOMIC_SEQ_CST);
     ((volatile AmpereAControlGPFifo *)c->userd.cpu)->GPPut = c->gpPut;
     __atomic_thread_fence(__ATOMIC_SEQ_CST);
+    // read GPPut back before the doorbell: USERD is video memory behind a write-combined BAR mapping, and the fence does
+    // not make the posted write arrive first. On an RTX 5060 Ti the host now and then fetched the old GPPut and the
+    // picture was never run (7 of 9600 4K AV1 pictures under AVFoundation; 0 of 9600 with the read)
+    (void)((volatile AmpereAControlGPFifo *)c->userd.cpu)->GPPut;
     *c->doorbell = c->token;
     return NV_OK;
 }
 
+bool chan_wait(Chan *c, volatile const NvU32 *sem, NvU32 val, double timeout_ms)
+{
+    // Spin until the semaphore holds val. A picture still not done after 50 ms (4K takes under 20) gets the doorbell
+    // rung again, which only makes the host read GPPut once more: a safety net for a submission it did not see.
+    struct timespec t; NV_CLOCK_GETTIME(CLOCK_MONOTONIC, &t);
+    const double t0 = t.tv_sec * 1e3 + t.tv_nsec / 1e6; double kick = t0 + 50, now = t0; unsigned kicks = 0;
+    while (*sem != val && now - t0 < timeout_ms) {
+        NV_CLOCK_GETTIME(CLOCK_MONOTONIC, &t); now = t.tv_sec * 1e3 + t.tv_nsec / 1e6;
+        if (now > kick) { *c->doorbell = c->token; kick += 50; kicks++; }
+    }
+    if (kicks) fprintf(stderr, "chan: semaphore %u late: doorbell rung %u more time(s), %s after %.0f ms\n", val, kicks, *sem == val ? "done" : "not done", now - t0);
+    return *sem == val;
+}
+
 bool chan_rewind(Chan *c)
 {
-    // the push buffer is linear: start over once the channel has fetched everything (GPGet == GPPut)
-    if (c->cur != c->segStart || (!c->settled && chan_gpget(c) != c->gpPut)) return false;
+    // the push buffer is linear: start over once the channel has fetched everything (GPGet == GPPut), and only once
+    // it is half used, so it is a ring that wraps now and then. Starting over after every picture (on Blackwell, where
+    // chan_done stands in for GPGet) lost a picture now and then under AVFoundation: no completion and no channel
+    // error, as if the engine had run the previous picture's methods from the same address (AV1 4K, about 1 in 1000);
+    // NullMoth's own decoders also advance through their push buffer picture by picture.
+    if (c->cur != c->segStart || chan_push_used(c) < c->push.size / 2 || (!c->settled && chan_gpget(c) != c->gpPut)) return false;
     c->cur = c->segStart = c->push.cpu;
     return true;
 }

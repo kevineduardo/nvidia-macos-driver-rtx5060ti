@@ -15,6 +15,8 @@ typedef struct {
     unsigned maxW, maxH;            // allocation size (pixels, multiple of 128)
     int bit_depth, bps;
     size_t pitch;                   // bytes
+    int gobY, gobC;                 // how the bytes of a decoded luma / chroma plane lie (blocklinear.h)
+    RmMem inter_scratch;            // Blackwell only (nvdec_blackwell.h); size 0 elsewhere
     RmMem setup, bs, cdf_def, cdf_out, tileinfo, tilestream, filter, intra, gm, fg, status, sem;
     RmMem cdf[8];                   // the CDF tables saved with each reference slot (what the engine wrote)
     RmMem tmv[AV1_SURFACES], seg[AV1_SURFACES];   // per surface: temporal MVs and segment IDs it wrote
@@ -48,3 +50,5 @@ int  av1dec_tu(Av1Dec *d, const uint8_t *buf, size_t n);
 void av1dec_release(Av1Dec *d, int surf);
 void av1dec_read_i420(Av1Dec *d, int surf, uint8_t *dst, unsigned w, unsigned h);
 void av1dec_read_nv12(Av1Dec *d, int surf, uint8_t *y, size_t ystride, uint8_t *uv, size_t uvstride, unsigned w, unsigned h);
+// a 16-bit session's picture as 8-bit NV12 (rounded), for a client that asked for 8 bits
+void av1dec_read_nv12_8bit(Av1Dec *d, int surf, uint8_t *y, size_t ystride, uint8_t *uv, size_t uvstride, unsigned w, unsigned h);

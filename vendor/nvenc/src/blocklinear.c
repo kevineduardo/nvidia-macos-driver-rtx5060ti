@@ -119,13 +119,58 @@ void gob_untile_plane(int layout, uint8_t *dst, size_t dst_stride, const uint8_t
     const size_t bands = (rows + 15) / 16;
     void (^band)(size_t) = ^(size_t b) {
         const size_t y1 = b * 16 + 16 < rows ? b * 16 + 16 : rows;
+        size_t xs = 0;   // whole tiles of a whole band: straight copies, no offset arithmetic per run (gob_inner's order)
+        if (y1 - b * 16 == 16) {
+            const size_t tiles = width / 64;
+            for (size_t t = 0; t < tiles; t++)
+                for (size_t g = 0; g < 2; g++) {
+                    const uint8_t *gob = src + b * pitch * 16 + t * 1024 + g * 512;
+                    for (size_t y = 0; y < 8; y++) {
+                        uint8_t *d = dst + (b * 16 + g * 8 + y) * dst_stride + t * 64;
+                        if (layout == GOB_BLACKWELL8)   // eight 8-byte columns of 64 bytes each
+                            for (size_t c = 0; c < 8; c++) { uint64_t v; memcpy(&v, gob + c * 64 + y * 8, 8); memcpy(d + c * 8, &v, 8); }
+                        else                            // two 32-byte halves of 256: 16-byte rows, four to a 64-byte group
+                            for (size_t k = 0; k < 4; k++)
+                                _mm_storeu_si128((__m128i *)(d + k * 16),
+                                                 _mm_loadu_si128((const __m128i *)(gob + (k >> 1) * 256 + (k & 1) * 128 + (y >> 2) * 64 + (y & 3) * 16)));
+                    }
+                }
+            xs = tiles * 64;
+        }
         for (size_t y = b * 16; y < y1; y++)
-            for (size_t x = 0; x < width; x += run) {
+            for (size_t x = xs; x < width; x += run) {
                 const size_t n = width - x < run ? width - x : run;
                 memcpy(dst + y * dst_stride + x, src + gob_offset(layout, x, y, pitch), n);
             }
     };
     if (bands >= 32) dispatch_apply(bands, dispatch_get_global_queue(QOS_CLASS_USER_INTERACTIVE, 0), band);
+    else for (size_t b = 0; b < bands; b++) band(b);
+}
+
+void gob_untile_plane_narrow(int layout, uint8_t *dst, size_t dst_stride, const uint8_t *src, size_t width, size_t rows, size_t pitch)
+{
+    // band by band (16 rows: one row of tiles, the same offsets in every layout): untiled into a buffer that stays in
+    // the cache, then narrowed into the picture
+    const size_t bands = (rows + 15) / 16, tw = (width + 63) & ~(size_t)63;
+    void (^band)(size_t) = ^(size_t b) {
+        const size_t n = rows - b * 16 < 16 ? rows - b * 16 : 16;
+        uint8_t *tmp = malloc(tw * 16);
+        if (!tmp) return;
+        gob_untile_plane(layout, tmp, tw, src + b * pitch * 16, width, n, pitch);
+        const __m128i half = _mm_set1_epi16(0x80);
+        for (size_t y = 0; y < n; y++) {
+            const uint8_t *s = tmp + y * tw; uint8_t *d = dst + (b * 16 + y) * dst_stride;
+            const size_t samples = width / 2; size_t x = 0;
+            for (; x + 16 <= samples; x += 16) {
+                const __m128i a = _mm_srli_epi16(_mm_adds_epu16(_mm_loadu_si128((const __m128i *)(s + 2 * x)), half), 8);
+                const __m128i c = _mm_srli_epi16(_mm_adds_epu16(_mm_loadu_si128((const __m128i *)(s + 2 * x + 16)), half), 8);
+                _mm_storeu_si128((__m128i *)(d + x), _mm_packus_epi16(a, c));
+            }
+            for (; x < samples; x++) { const unsigned v = (unsigned)(s[2 * x] | s[2 * x + 1] << 8) + 0x80; d[x] = (uint8_t)(v > 0xffff ? 0xff : v >> 8); }
+        }
+        free(tmp);
+    };
+    if (bands >= 8) dispatch_apply(bands, dispatch_get_global_queue(QOS_CLASS_USER_INTERACTIVE, 0), band);
     else for (size_t b = 0; b < bands; b++) band(b);
 }
 

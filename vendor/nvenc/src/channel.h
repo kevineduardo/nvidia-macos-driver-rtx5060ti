@@ -23,6 +23,8 @@ void chan_destroy(Chan *c);
 // incrementing method header + data: method byte offset, on subchannel subch
 void chan_mthd(Chan *c, int subch, NvU32 mthd, int count, ...);
 NV_STATUS chan_submit(Chan *c);                // everything since the last submit
+// spin until *sem == val, at most timeout_ms, ringing the doorbell again for a submission late by 50 ms; true when done
+bool chan_wait(Chan *c, volatile const NvU32 *sem, NvU32 val, double timeout_ms);
 NvU32 chan_gpget(Chan *c);                     // how far the channel has fetched
 bool chan_rewind(Chan *c);                     // reuse the push buffer from its start (only when everything was fetched)
 // The caller saw the engine's completion of its last submission (a semaphore release that was the last method of it).

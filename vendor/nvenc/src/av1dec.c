@@ -11,6 +11,7 @@
 #include "class/clc56f.h"
 #include "class/cl2080_notification.h"
 #include "clc9b0.h"
+#include "nvdec_blackwell.h"
 #include "nvdec_drv.h"
 
 static NvU32 hi(NvU64 a) { return (NvU32)(a >> 8); }
@@ -26,11 +27,13 @@ int av1dec_open(Av1Dec *d, Rm *rm, unsigned maxW, unsigned maxH, int bit_depth)
 {
     memset(d, 0, sizeof *d);
     d->rm = rm; d->maxW = (maxW + 127) & ~127u; d->maxH = (maxH + 127) & ~127u;
-    // AV1 decoding came with Ampere's NVDEC (GA10x 0xc7b0, Ada 0xc9b0); Turing (0xc4b0) and GA100 (0xc6b0) have none
+    // AV1 decoding came with Ampere's NVDEC (GA10x 0xc7b0, Ada 0xc9b0, Blackwell 0xcfb0); Turing (0xc4b0) and GA100 (0xc6b0) have none
     const NvU32 cls = rm_class(rm, RM_CLS_NVDEC);
-    if (cls != 0xc7b0 && cls != 0xc9b0) { fprintf(stderr, "av1dec: this GPU's NVDEC (class 0x%x) has no AV1\n", cls); return -1; }
+    if (cls != 0xc7b0 && cls != 0xc9b0 && cls != NVDEC_CLASS_BLACKWELL) { fprintf(stderr, "av1dec: this GPU's NVDEC (class 0x%x) has no AV1\n", cls); return -1; }
     d->bit_depth = bit_depth; d->bps = bit_depth > 8 ? 2 : 1;
     d->pitch = (size_t)d->maxW * (size_t)d->bps;
+    // Decoded planes: on Blackwell in its own layouts, which the picture setup names (nvdec_blackwell.h's plane kinds)
+    d->gobY = gob_layout_for(rm_class(rm, RM_CLS_NVDEC), (unsigned)d->bps); d->gobC = gob_layout_for(rm_class(rm, RM_CLS_NVDEC), 2u * (unsigned)d->bps);
     for (int i = 0; i < 8; i++) d->ref[i] = -1;
     for (int i = 0; i < AV1_SURFACES; i++) d->twin[i] = -1;
     d->cdf_size = AV1_PROBS_B;
@@ -61,6 +64,7 @@ int av1dec_open(Av1Dec *d, Rm *rm, unsigned maxW, unsigned maxH, int bit_depth)
             alloc(rm, &d->tmv[i], AV1_TEMPORAL_MV_BUF_SIZE(W, H)) || alloc(rm, &d->seg[i], AV1_SEGMENT_ID_BUF_SIZE(W, H))) {
             fprintf(stderr, "av1dec: surface alloc failed\n"); return -1;
         }
+    if (cls == NVDEC_CLASS_BLACKWELL && alloc(rm, &d->inter_scratch, NVCFB0_INTER_SCRATCH_SIZE(W, H))) { fprintf(stderr, "av1dec: alloc failed\n"); return -1; }
     chan_mthd(&d->chan, 0, NVC56F_SET_OBJECT, 1, rm_class(rm, RM_CLS_NVDEC));
     return 0;
 }
@@ -72,6 +76,7 @@ void av1dec_close(Av1Dec *d)
     for (size_t i = 0; i < sizeof m / sizeof m[0]; i++) rm_mem_free(d->rm, m[i]);
     for (int i = 0; i < 8; i++) rm_mem_free(d->rm, &d->cdf[i]);
     rm_mem_free(d->rm, &d->zseg);
+    if (d->inter_scratch.size) rm_mem_free(d->rm, &d->inter_scratch);
     for (int i = 0; i < AV1_SURFACES; i++) { rm_mem_free(d->rm, &d->luma[i]); rm_mem_free(d->rm, &d->chroma[i]); rm_mem_free(d->rm, &d->tmv[i]); rm_mem_free(d->rm, &d->seg[i]); }
     for (int q = 0; q < 4; q++) free(d->cdf_tab[q]);
 }
@@ -81,14 +86,21 @@ void av1dec_release(Av1Dec *d, int surf) { if (surf >= 0 && surf < AV1_SURFACES)
 void av1dec_read_nv12(Av1Dec *d, int surf, uint8_t *y, size_t ystride, uint8_t *uv, size_t uvstride, unsigned w, unsigned h)
 {
     const size_t b = (size_t)d->bps;
-    nvenc_in_untile_plane(y, ystride, d->luma[surf].cpu, w * b, h, d->pitch);
-    nvenc_in_untile_plane(uv, uvstride, d->chroma[surf].cpu, ((w + 1) & ~1u) * b, (h + 1) / 2, d->pitch);
+    gob_untile_plane(d->gobY, y, ystride, d->luma[surf].cpu, w * b, h, d->pitch);
+    gob_untile_plane(d->gobC, uv, uvstride, d->chroma[surf].cpu, ((w + 1) & ~1u) * b, (h + 1) / 2, d->pitch);
 }
 
-static unsigned sample(const uint8_t *p, size_t x, size_t y, size_t pitch, int bps, int shift)
+void av1dec_read_nv12_8bit(Av1Dec *d, int surf, uint8_t *y, size_t ystride, uint8_t *uv, size_t uvstride, unsigned w, unsigned h)
 {
-    if (bps == 1) return p[nvenc_in_offset(x, y, pitch)];
-    const size_t o = nvenc_in_offset(2 * x, y, pitch);
+    if (d->bps != 2) { av1dec_read_nv12(d, surf, y, ystride, uv, uvstride, w, h); return; }
+    gob_untile_plane_narrow(d->gobY, y, ystride, d->luma[surf].cpu, (size_t)w * 2, h, d->pitch);
+    gob_untile_plane_narrow(d->gobC, uv, uvstride, d->chroma[surf].cpu, (size_t)((w + 1) & ~1u) * 2, (h + 1) / 2, d->pitch);
+}
+
+static unsigned sample(const uint8_t *p, int gob, size_t x, size_t y, size_t pitch, int bps, int shift)
+{
+    if (bps == 1) return p[gob_offset(gob, x, y, pitch)];
+    const size_t o = gob_offset(gob, 2 * x, y, pitch);
     return (unsigned)(p[o] | p[o + 1] << 8) >> shift;
 }
 
@@ -99,10 +111,10 @@ void av1dec_read_i420(Av1Dec *d, int surf, uint8_t *dst, unsigned w, unsigned h)
     const int b = d->bps, sh = b == 2 ? 16 - d->bit_depth : 0;
     #define PUT(i, v) do { if (b == 1) dst[i] = (uint8_t)(v); else { dst[2 * (i)] = (uint8_t)(v); dst[2 * (i) + 1] = (uint8_t)((v) >> 8); } } while (0)
     const size_t U = (size_t)w * h, V = U + (size_t)cw * ch;
-    for (unsigned y = 0; y < h; y++) for (unsigned x = 0; x < w; x++) PUT((size_t)y * w + x, sample(L, x, y, d->pitch, b, sh));
+    for (unsigned y = 0; y < h; y++) for (unsigned x = 0; x < w; x++) PUT((size_t)y * w + x, sample(L, d->gobY, x, y, d->pitch, b, sh));
     for (unsigned y = 0; y < ch; y++) for (unsigned x = 0; x < cw; x++) {
-        PUT(U + (size_t)y * cw + x, sample(C, 2 * x, y, d->pitch, b, sh));
-        PUT(V + (size_t)y * cw + x, sample(C, 2 * x + 1, y, d->pitch, b, sh));
+        PUT(U + (size_t)y * cw + x, sample(C, d->gobC, 2 * x, y, d->pitch, b, sh));
+        PUT(V + (size_t)y * cw + x, sample(C, d->gobC, 2 * x + 1, y, d->pitch, b, sh));
     }
     #undef PUT
 }
@@ -424,6 +436,13 @@ static int decode_frame(Av1Dec *d)
         rf->wmtype = (unsigned char)f->gm_type[i + 1];
     }
     ps->tileformat = 1; ps->gob_height = 0;
+    if (d->inter_scratch.size) {
+        // Blackwell's additions (nvdec_blackwell.h): 0xffff in reserved12, the planes' kinds and the surface format code in
+        // the last word's reserved bits (15.. and 19..), and after the structure the width of the 0x4dc area in its units
+        ps->reserved12 = 0xffff;
+        ps->reserved_stat = NVCFB0_PLANE_KINDS(d->bps) | NVCFB0_SURFACE_FORMAT(s->bit_depth) << 4;
+        *(NvU32 *)((uint8_t *)d->setup.cpu + 0x244) = NVCFB0_BLK_UNITS(f->upscaled_width);
+    }
     ps->Av1FltTopOffset = (unsigned)(d->flt_top >> 8); ps->Av1FltVertOffset = (unsigned)(d->flt_vert >> 8);
     ps->Av1CdefVertOffset = (unsigned)(d->flt_cdef >> 8); ps->Av1LrVertOffset = (unsigned)(d->flt_lr >> 8);
     ps->Av1HusVertOffset = (unsigned)(d->flt_hus >> 8); ps->Av1FgsVertOffset = (unsigned)(d->flt_fgs >> 8);
@@ -518,6 +537,7 @@ static int decode_frame(Av1Dec *d)
     BUF(NVC9B0_SET_TILE_SIZE_BUF_OFFSET, d->tileinfo.gpu);
     BUF(NVC9B0_SET_FILTER_BUFFER_OFFSET, d->filter.gpu);
     BUF(NVC9B0_SET_INTRA_TOP_BUF_OFFSET, d->intra.gpu);
+    if (d->inter_scratch.size) BUF(NVCFB0_SET_INTER_SCRATCH_OFFSET, d->inter_scratch.gpu);   // Blackwell
     BUF(NVC9B0_AV1_SET_PROB_TAB_READ_BUF_OFFSET, cdf_in->gpu);
     BUF(NVC9B0_AV1_SET_PROB_TAB_WRITE_BUF_OFFSET, d->cdf_out.gpu);
     BUF(NVC9B0_AV1_SET_SEGMENT_READ_BUF_OFFSET, segRead >= 0 ? d->seg[segRead].gpu : d->zseg.gpu);
@@ -547,9 +567,17 @@ static int decode_frame(Av1Dec *d)
               DRF_DEF(C9B0, _SEMAPHORE_D, _OPERATION, _RELEASE) | DRF_DEF(C9B0, _SEMAPHORE_D, _PAYLOAD_SIZE, _32BIT));
     const double t0 = now_ms();
     chan_submit(c);
-    while (sv[0] != val && now_ms() - t0 < 1000) { }
+    chan_wait(c, sv, val, 1000);
     d->engine_ms = now_ms() - t0;
-    if (sv[0] != val) { fprintf(stderr, "av1dec: no completion (error notifier 0x%x)\n", chan_error(c)); return -1; }
+    if (sv[0] != val) {
+        NvU64 fa = 0; NvU32 ft = 0; char fs[32] = "";
+        fprintf(stderr, "av1dec: no completion (error notifier 0x%x)\n", chan_error(c));
+        if (chan_error(c) && !chan_fault(c, &fa, &ft, fs) && fa) fprintf(stderr, "av1dec: MMU fault at 0x%llx type %u %s\n", (unsigned long long)fa, ft, fs);
+        return -1;
+    }
+    // the engine is done with the push buffer: it may start over (Blackwell's channel class reports no GPGet, so
+    // chan_rewind would otherwise never reuse it and the 64 KB filled after ~200 pictures; dec.c does the same)
+    chan_done(c);
     const nvdec_status_s *st = d->status.cpu;
     d->err_status = st->error_status; d->ok_blocks = st->mbs_correctly_decoded;
     if (d->verbose)
