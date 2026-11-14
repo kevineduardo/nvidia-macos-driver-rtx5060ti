@@ -1674,7 +1674,7 @@ static char nvmtl_surface_cache_key;
     if (nvmtl_vk_init()) return nil;
     size_t w = d.width, h = d.height;
     if (!w || !h || w > UINT32_MAX || h > UINT32_MAX) return nil;
-    if (surf && plane >= MAX((size_t)1, IOSurfaceGetPlaneCount(surf))) return nil;
+    if (surf && plane >= MAX((size_t)1, IOSurfaceGetPlaneCount(surf))) { nvlog("newTextureWithDescriptor:iosurface:plane: plane %lu of a surface with %zu - nil", (unsigned long)plane, IOSurfaceGetPlaneCount(surf)); return nil; }
     NVMTLTexture *t = [NVMTLTexture new];
     t->_ropt = (MTLResourceOptions)d.cpuCacheMode | ((MTLResourceOptions)NVMTL_SINCE(10.15, NSUInteger, d.hazardTrackingMode, 0) << MTLResourceHazardTrackingModeShift)
              | ((MTLResourceOptions)d.storageMode << MTLResourceStorageModeShift);
@@ -1687,7 +1687,13 @@ static char nvmtl_surface_cache_key;
         return made;
     }
     uint32_t vkf = 0, bpp = 0; int a8 = 0;
-    if (nvmtl_pixfmt(d.pixelFormat, &vkf, &bpp, &a8)) return nil;
+    if (nvmtl_pixfmt(d.pixelFormat, &vkf, &bpp, &a8)) {
+        nvlog("newTextureWithDescriptor:iosurface:plane: pixel format %lu has no Vulkan format here - nil (%zux%zu, plane %lu of %zu, surface format '%c%c%c%c')",
+              (unsigned long)d.pixelFormat, w, h, (unsigned long)plane, surf ? IOSurfaceGetPlaneCount(surf) : 0,
+              surf ? (char)(IOSurfaceGetPixelFormat(surf) >> 24) : '-', surf ? (char)(IOSurfaceGetPixelFormat(surf) >> 16) : '-',
+              surf ? (char)(IOSurfaceGetPixelFormat(surf) >> 8) : '-', surf ? (char)IOSurfaceGetPixelFormat(surf) : '-');
+        return nil;
+    }
     int wantStex = (d.usage & MTLTextureUsageShaderWrite) != 0;
     NSArray *key = surf ? @[@(IOSurfaceGetID(surf)), @(plane), @(w), @(h), @(d.pixelFormat), @(t->_ropt), @(t->_fbo)] : nil;
     NVMTLTexture *backing = key ? [cache objectForKey:key] : nil;
