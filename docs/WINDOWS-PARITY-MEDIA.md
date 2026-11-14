@@ -5,7 +5,7 @@ Each row names the Windows feature, the state in this tree, and what closes it o
 | feature (Windows) | state here | to close, or the hard reason |
 |---|---|---|
 | H.264 and HEVC decode, all chips from GTX 16 | built-in decoders; vendored NVEncVT adds Ada and Ampere | Ampere H.264/HEVC through NVEncVT needs a GA10x card to validate; until then the built-in decoder stays |
-| AV1 decode (RTX 30 and newer), VP9 decode | NVEncVT registers both on Ada and Ampere | Blackwell: NVEncVT does not know the Blackwell decode class; needs a Blackwell card and its class headers |
+| AV1 decode (RTX 30 and newer), VP9 decode | NVEncVT registers both on Ada, Ampere and Blackwell (Blackwell: bit-exact on an RTX 5060 Ti, `NVMTL_NVENCVT=1` in nvrm610.conf; see BLACKWELL-VIDEO-DECODE.md) | Blackwell is not in the plugin's automatic NVEncVT choice yet (plugin rebuild) |
 | AV1 encode (Ada, Blackwell) | Ada through NVEncVT; Blackwell none | Blackwell encode setup differs from Ada's; needs a Blackwell card to validate |
 | HEVC and H.264 encode, Turing to Blackwell | Turing and Ampere through the built-in libraries, Ada through NVEncVT, Blackwell built-in | Ampere NVEncVT encode not enabled: the vendored setup targets Ada and TU117 |
 | 4:2:2 decode and encode (Blackwell) | none | needs a Blackwell card |
